@@ -1,4 +1,3 @@
-import json
 import re
 
 import pandas as pd
@@ -9,16 +8,30 @@ st.set_page_config(page_title="FPL Syndicate", layout="wide")
 
 st.title("FPL Syndicate")
 
-DATA_FILE = "mock_fpl_data.json"
+EXCEL_FILE = "Teams_2025.xlsx"
 
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
 
 # Все лиги турнира в иерархическом порядке — выводятся по мере наполнения
 ALL_LEAGUES = ["Premier League", "A-1", "A-2", "B-1", "B-2", "B-3", "C", "D"]
 
-# Ссылка на опубликованный CSV админ-панели (File -> Share -> Publish to web -> CSV)
+# Маппинг названий лиг из Excel в наш единый стандарт league_tier
+LEAGUE_NAME_MAP = {
+    "H2H League PL": "Premier League",
+    "H2H League A-1": "A-1",
+    "H2H League A-2": "A-2",
+    "H2H League B-1": "B-1",
+    "H2H League B-2": "B-2",
+    "H2H League B-3": "B-3",
+    "H2H League C": "C",
+    "H2H League D": "D",
+}
+
+# Постоянная ссылка на опубликованный CSV админ-панели
 CSV_URL = (
-    "https://docs.google.com/spreadsheets/d/e/2PACX-1vS8jhaEpFQVR8Sk78GKDUuUHjBwZT55ybatubqw7pPT48Vz7pLo_YWyKtek6dCuo4dS1R9V_tlJrFKH/pub?output=csv"
+    "https://docs.google.com/spreadsheets/d/e/"
+    "2PACX-1vS8jhaEpFQVR8Sk78GKDUuUHjBwZT55ybatubqw7pPT48Vz7pLo_YWyKtek"
+    "6dCuo4dS1R9V_tlJrFKH/pub?output=csv"
 )
 
 ADMIN_REQUIRED_COLS = [
@@ -64,17 +77,69 @@ def sum_gw_range(df: pd.DataFrame, start: int, end: int) -> pd.Series:
     return df[cols].sum(axis=1)
 
 
-# ---------- Загрузка mock-данных ----------
+def normalize_league(raw_value) -> str:
+    """Приводит название лиги из Excel к стандарту league_tier."""
+    raw = str(raw_value).strip()
+    if raw in LEAGUE_NAME_MAP:
+        return LEAGUE_NAME_MAP[raw]
+    # Запасной вариант: убираем префикс "H2H League" и сверяем остаток
+    stripped = re.sub(r"^H2H\s+League\s+", "", raw, flags=re.IGNORECASE).strip()
+    if stripped == "PL":
+        return "Premier League"
+    if stripped in ALL_LEAGUES:
+        return stripped
+    return raw  # неизвестная лига — вернём как есть, покажем в warning
+
+
+# ---------- Загрузка данных сезона 2025 из Excel ----------
 
 @st.cache_data
 def load_mock_data(path: str) -> pd.DataFrame:
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    df = pd.DataFrame(raw)
+    raw_df = pd.read_excel(path)
+    raw_df.columns = [str(c).strip() for c in raw_df.columns]
+
+    rename_map = {
+        "Fantasy ID": "team_id",
+        "Manager": "manager_name",
+        "Team Name": "team_name",
+    }
+    # Колонки туров: GW1..GW38 -> gw1_pts..gw38_pts
+    for col in raw_df.columns:
+        m = re.fullmatch(r"GW\s?(\d+)", col, flags=re.IGNORECASE)
+        if m:
+            rename_map[col] = gw_col(int(m.group(1)))
+
+    df = raw_df.rename(columns=rename_map)
+
+    required = ["team_id", "manager_name", "team_name", "League"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"В файле {path} отсутствуют колонки: {', '.join(missing)}"
+        )
+
+    df["league_tier"] = df["League"].apply(normalize_league)
+
+    df["team_id"] = pd.to_numeric(df["team_id"], errors="coerce")
+    df = df.dropna(subset=["team_id"]).copy()
+    df["team_id"] = df["team_id"].astype(int)
+
     for col in get_gw_cols(df):
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+        # round, а не truncate: в файле встречаются дробные значения (51.9)
+        df[col] = (
+            pd.to_numeric(df[col], errors="coerce").fillna(0).round().astype(int)
+        )
+
+    # Стоимости состава в файле нет — оставляем пустой колонкой
+    if "team_value" not in df.columns:
+        df["team_value"] = pd.NA
     df["team_value"] = pd.to_numeric(df["team_value"], errors="coerce")
-    return df
+
+    keep = (
+        ["team_id", "manager_name", "team_name", "league_tier", "team_value"]
+        + get_gw_cols(df)
+    )
+    return df[keep]
 
 
 # ---------- Чтение админ-панели из Google Sheets ----------
@@ -170,7 +235,7 @@ def fetch_fpl_data(team_ids: list[int], team_tier_map: dict) -> pd.DataFrame:
     if not rows:
         st.error(
             "Серверы FPL недоступны или ни одна команда не загрузилась. "
-            "Переключись на Mock данные в боковой панели."
+            "Переключись на данные сезона 2025 в боковой панели."
         )
         return pd.DataFrame(
             columns=[
@@ -295,11 +360,29 @@ def render_cup_table(cup_df: pd.DataFrame):
 st.sidebar.header("Источник данных")
 data_source = st.sidebar.radio(
     "Откуда брать данные:",
-    ("Использовать Mock данные", "Использовать API FPL"),
+    ("Данные сезона 2025 (Excel)", "Использовать API FPL"),
 )
 
-if data_source == "Использовать Mock данные":
-    df = load_mock_data(DATA_FILE)
+if data_source == "Данные сезона 2025 (Excel)":
+    try:
+        df = load_mock_data(EXCEL_FILE)
+    except FileNotFoundError:
+        st.error(
+            f"Файл {EXCEL_FILE} не найден. Положи его в одну папку с app.py."
+        )
+        st.stop()
+    except Exception as e:
+        st.error(f"Не удалось прочитать {EXCEL_FILE}: {e}")
+        st.stop()
+
+    # Предупреждение о лигах, не попавших в стандарт ALL_LEAGUES
+    unknown = sorted(set(df["league_tier"]) - set(ALL_LEAGUES))
+    if unknown:
+        st.warning(
+            "В файле есть лиги вне стандартного списка, их команды не "
+            f"отобразятся в таблицах: {', '.join(unknown)}. "
+            "Проверь LEAGUE_NAME_MAP."
+        )
 else:
     try:
         team_ids, team_tier_map = load_admin_sheet(CSV_URL)
