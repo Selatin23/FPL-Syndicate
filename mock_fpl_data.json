@@ -1,0 +1,102 @@
+[
+  {
+    "team_id": 1,
+    "manager_name": "Sultan",
+    "team_name": "Desert Kings",
+    "league_tier": "Premier League",
+    "gw1_pts": 78,
+    "gw2_pts": 55,
+    "gw3_pts": 61,
+    "team_value": 100.5
+  },
+  {
+    "team_id": 2,
+    "manager_name": "Timur",
+    "team_name": "Steppe Wolves",
+    "league_tier": "A-1",
+    "gw1_pts": 44,
+    "gw2_pts": 67,
+    "gw3_pts": 52,
+    "team_value": 99.8
+  },
+  {
+    "team_id": 3,
+    "manager_name": "Aidos",
+    "team_name": "Golden Eagles",
+    "league_tier": "Premier League",
+    "gw1_pts": 63,
+    "gw2_pts": 71,
+    "gw3_pts": 48,
+    "team_value": 101.2
+  },
+  {
+    "team_id": 4,
+    "manager_name": "Ruslan",
+    "team_name": "Red Machine",
+    "league_tier": "A-1",
+    "gw1_pts": 39,
+    "gw2_pts": 58,
+    "gw3_pts": 74,
+    "team_value": 100.0
+  },
+  {
+    "team_id": 5,
+    "manager_name": "Daniyar",
+    "team_name": "Night Falcons",
+    "league_tier": "Premier League",
+    "gw1_pts": 82,
+    "gw2_pts": 46,
+    "gw3_pts": 59,
+    "team_value": 102.3
+  },
+  {
+    "team_id": 6,
+    "manager_name": "Marat",
+    "team_name": "Iron Bulls",
+    "league_tier": "A-1",
+    "gw1_pts": 51,
+    "gw2_pts": 62,
+    "gw3_pts": 33,
+    "team_value": 98.7
+  },
+  {
+    "team_id": 7,
+    "manager_name": "Olzhas",
+    "team_name": "Thunder FC",
+    "league_tier": "Premier League",
+    "gw1_pts": 57,
+    "gw2_pts": 88,
+    "gw3_pts": 42,
+    "team_value": 100.9
+  },
+  {
+    "team_id": 8,
+    "manager_name": "Yerlan",
+    "team_name": "Snow Leopards",
+    "league_tier": "A-1",
+    "gw1_pts": 66,
+    "gw2_pts": 35,
+    "gw3_pts": 70,
+    "team_value": 99.4
+  },
+  {
+    "team_id": 9,
+    "manager_name": "Askar",
+    "team_name": "City Lions",
+    "league_tier": "Premier League",
+    "gw1_pts": 45,
+    "gw2_pts": 53,
+    "gw3_pts": 86,
+    "team_value": 101.7
+  },
+  {
+    "team_id": 10,
+    "manager_name": "Bekzat",
+    "team_name": "Nomad United",
+    "league_tier": "A-1",
+    "gw1_pts": 73,
+    "gw2_pts": 49,
+    "gw3_pts": 64,
+    "team_value": 100.2
+  }
+]
