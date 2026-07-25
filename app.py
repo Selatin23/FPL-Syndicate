@@ -13,19 +13,19 @@ GW_COLS = ["gw1_pts", "gw2_pts", "gw3_pts"]
 
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
 
-# Тестовые ID реальных команд FPL (замени на ID участников синдиката)
-TEST_TEAM_IDS = [50220, 51764, 91928, 158533, 215432, 860834]
+# Ссылка на опубликованный CSV админ-панели (File -> Share -> Publish to web -> CSV)
+CSV_URL = (
+    "https://docs.google.com/spreadsheets/d/e/"
+    "2PACX-1vTEST_PLACEHOLDER_ID/pub?gid=0&single=true&output=csv"
+)
 
-# В API нет понятия наших лиг, поэтому распределение задаём сами.
-# ID, которого нет в словаре, попадёт в Premier League по умолчанию.
-TEAM_TIER_MAP = {
-    50220: "A-1",
-    51764: "A-2",
-    91928: "Premier League",
-    158533: "B-1",
-    215432: "B-2",
-    860834: "Premier League",
-}
+ADMIN_REQUIRED_COLS = [
+    "Phone_Number",
+    "FPL_Team_ID",
+    "Manager_Name",
+    "League_Tier",
+    "Payment_Status",
+]
 
 
 # ---------- Загрузка mock-данных ----------
@@ -41,10 +41,42 @@ def load_mock_data(path: str) -> pd.DataFrame:
     return df
 
 
+# ---------- Чтение админ-панели из Google Sheets ----------
+
+@st.cache_data(ttl=60)
+def load_admin_sheet(url: str):
+    """Читает опубликованный CSV и возвращает (team_ids, team_tier_map).
+
+    team_ids: список FPL_Team_ID (int, без NaN)
+    team_tier_map: {FPL_Team_ID: League_Tier}
+    """
+    admin_df = pd.read_csv(url)
+
+    missing = [c for c in ADMIN_REQUIRED_COLS if c not in admin_df.columns]
+    if missing:
+        raise ValueError(
+            f"В админ-таблице отсутствуют колонки: {', '.join(missing)}"
+        )
+
+    # Чистим FPL_Team_ID: убираем NaN, строго приводим к int
+    admin_df["FPL_Team_ID"] = pd.to_numeric(
+        admin_df["FPL_Team_ID"], errors="coerce"
+    )
+    admin_df = admin_df.dropna(subset=["FPL_Team_ID"]).copy()
+    admin_df["FPL_Team_ID"] = admin_df["FPL_Team_ID"].astype(int)
+
+    team_ids = admin_df["FPL_Team_ID"].tolist()
+    team_tier_map = dict(
+        zip(admin_df["FPL_Team_ID"], admin_df["League_Tier"].astype(str).str.strip())
+    )
+
+    return team_ids, team_tier_map
+
+
 # ---------- Загрузка из FPL API ----------
 
 @st.cache_data(ttl=600)  # кэш 10 минут, чтобы не дёргать API на каждый rerun
-def fetch_fpl_data(team_ids: list[int]) -> pd.DataFrame:
+def fetch_fpl_data(team_ids: list[int], team_tier_map: dict) -> pd.DataFrame:
     rows = []
     errors = []
 
@@ -89,7 +121,7 @@ def fetch_fpl_data(team_ids: list[int]) -> pd.DataFrame:
                         f"{entry.get('player_last_name', '')}"
                     ).strip(),
                     "team_name": entry.get("name", f"Team {team_id}"),
-                    "league_tier": TEAM_TIER_MAP.get(
+                    "league_tier": team_tier_map.get(
                         team_id, "Premier League"
                     ),
                     **gw_points,
@@ -133,11 +165,30 @@ data_source = st.sidebar.radio(
     ("Использовать Mock данные", "Использовать API FPL"),
 )
 
+df = None
+
 if data_source == "Использовать Mock данные":
     df = load_mock_data(DATA_FILE)
 else:
+    # Сначала читаем админ-панель, затем идём в FPL API
+    try:
+        team_ids, team_tier_map = load_admin_sheet(CSV_URL)
+    except Exception as e:
+        st.error(
+            "Не удалось загрузить админ-таблицу Google Sheets. "
+            f"Проверь CSV_URL и доступ к публикации.\n\nДетали: {e}"
+        )
+        st.stop()
+
+    if not team_ids:
+        st.error(
+            "Админ-таблица загрузилась, но не содержит ни одного "
+            "валидного FPL_Team_ID. Заполни колонку FPL_Team_ID."
+        )
+        st.stop()
+
     with st.spinner("Загружаю данные из FPL API..."):
-        df = fetch_fpl_data(TEST_TEAM_IDS)
+        df = fetch_fpl_data(team_ids, team_tier_map)
 
 # ---------- Расчёт и вывод таблиц ----------
 
