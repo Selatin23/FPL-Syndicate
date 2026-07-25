@@ -146,7 +146,8 @@ def load_mock_data(path: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def load_admin_sheet(url: str):
-    """Читает опубликованный CSV и возвращает (team_ids, team_tier_map)."""
+    """Читает опубликованный CSV и возвращает
+    (team_ids, team_tier_map, payment_map)."""
     admin_df = pd.read_csv(url)
 
     missing = [c for c in ADMIN_REQUIRED_COLS if c not in admin_df.columns]
@@ -168,8 +169,14 @@ def load_admin_sheet(url: str):
             admin_df["League_Tier"].astype(str).str.strip(),
         )
     )
+    payment_map = dict(
+        zip(
+            admin_df["FPL_Team_ID"],
+            admin_df["Payment_Status"].astype(str).str.strip(),
+        )
+    )
 
-    return team_ids, team_tier_map
+    return team_ids, team_tier_map, payment_map
 
 
 # ---------- Загрузка из FPL API ----------
@@ -444,6 +451,52 @@ def calculate_squid_game(df: pd.DataFrame, current_gw: int):
     return history, last_round
 
 
+# ---------- Модуль «Зал Славы» ----------
+
+def calculate_hall_of_fame(df: pd.DataFrame):
+    """Рекорды сезона: лучший тур, чемпион по тоталу, топ по среднему баллу."""
+    cols = get_gw_cols(df)
+    pts = df[cols]
+
+    # Абсолютный рекорд очков за один тур
+    best_per_team = pts.max(axis=1)
+    record_idx = best_per_team.idxmax()
+    record_gw_col = pts.loc[record_idx].idxmax()
+    record = {
+        "points": int(pts.loc[record_idx, record_gw_col]),
+        "gw": int(re.findall(r"\d+", record_gw_col)[0]),
+        "manager": df.loc[record_idx, "manager_name"],
+        "team": df.loc[record_idx, "team_name"],
+        "league": df.loc[record_idx, "league_tier"],
+    }
+
+    # Чемпион сезона по сумме очков
+    totals = pts.sum(axis=1)
+    champ_idx = totals.idxmax()
+    champion = {
+        "points": int(totals.loc[champ_idx]),
+        "manager": df.loc[champ_idx, "manager_name"],
+        "team": df.loc[champ_idx, "team_name"],
+        "league": df.loc[champ_idx, "league_tier"],
+    }
+
+    # Таблица лидеров: средний балл за тур, разброс, лучший тур
+    leaders = pd.DataFrame(
+        {
+            "Менеджер": df["manager_name"],
+            "Команда": df["team_name"],
+            "Лига": df["league_tier"],
+            "Total": totals,
+            "Средний балл": pts.mean(axis=1).round(2),
+            "Лучший тур": best_per_team.astype(int),
+            "Разброс (σ)": pts.std(axis=1).round(2),
+        }
+    ).sort_values("Средний балл", ascending=False).reset_index(drop=True)
+    leaders.index = leaders.index + 1
+
+    return record, champion, leaders
+
+
 # ---------- Выбор источника данных ----------
 
 st.sidebar.header("Источник данных")
@@ -472,9 +525,15 @@ if data_source == "Данные сезона 2025 (Excel)":
             f"отобразятся в таблицах: {', '.join(unknown)}. "
             "Проверь LEAGUE_NAME_MAP."
         )
+
+    # Статусы взносов подтягиваем из админ-таблицы; её недоступность не критична
+    try:
+        _, _, payment_map = load_admin_sheet(CSV_URL)
+    except Exception:
+        payment_map = {}
 else:
     try:
-        team_ids, team_tier_map = load_admin_sheet(CSV_URL)
+        team_ids, team_tier_map, payment_map = load_admin_sheet(CSV_URL)
     except Exception as e:
         st.error(
             "Не удалось загрузить админ-таблицу Google Sheets. "
@@ -529,10 +588,17 @@ def league_table(data: pd.DataFrame, tier: str) -> pd.DataFrame:
     return table[DISPLAY_COLS]
 
 
+# Селектор менеджера для Финансового Хаба (поиск набором текста)
+st.sidebar.header("Кошелёк менеджера")
+selected_manager = st.sidebar.selectbox(
+    "Менеджер",
+    options=sorted(df["manager_name"].astype(str).unique()),
+)
+
 # ---------- Вывод: вкладки ----------
 
-tab_leagues, tab_cups, tab_squid = st.tabs(
-    ["🏆 Лиги", "🌍 Еврокубки", "🦑 Squid Game"]
+tab_leagues, tab_cups, tab_squid, tab_fame, tab_wallet = st.tabs(
+    ["🏆 Лиги", "🌍 Еврокубки", "🦑 Squid Game", "🏅 Зал Славы", "💰 Финансовый Хаб"]
 )
 
 with tab_leagues:
@@ -678,3 +744,79 @@ with tab_squid:
             table.style.map(color_status, subset=["Статус"]),
             use_container_width=True,
         )
+
+with tab_fame:
+    record, champion, leaders = calculate_hall_of_fame(df)
+
+    st.header("🏅 Зал Славы — рекорды сезона")
+
+    f1, f2, f3 = st.columns(3)
+    f1.metric(
+        "🔥 Рекорд одного тура",
+        f"{record['points']} очков",
+        f"GW{record['gw']} — {record['manager']}",
+        delta_color="off",
+    )
+    f2.metric(
+        "👑 Чемпион сезона (Total)",
+        f"{champion['points']} очков",
+        f"{champion['manager']} ({champion['league']})",
+        delta_color="off",
+    )
+    best_avg = leaders.iloc[0]
+    f3.metric(
+        "📈 Лучший средний балл",
+        f"{best_avg['Средний балл']}",
+        f"{best_avg['Менеджер']} ({best_avg['Лига']})",
+        delta_color="off",
+    )
+
+    st.caption(
+        f"Рекорд тура: {record['team']} ({record['manager']}, "
+        f"{record['league']}) — {record['points']} очков в GW{record['gw']}. "
+        f"Чемпион: {champion['team']}."
+    )
+
+    st.subheader("Таблица лидеров (по среднему баллу за тур)")
+    st.dataframe(leaders.head(15), use_container_width=True)
+
+with tab_wallet:
+    st.header("💰 Финансовый Хаб")
+
+    row = df[df["manager_name"].astype(str) == selected_manager]
+    if row.empty:
+        st.info("Выбери менеджера в боковой панели.")
+    else:
+        m = row.iloc[0]
+        m_idx = row.index[0]
+
+        # Призовые Squid Game: сумма банков выигранных циклов
+        squid_history, _ = calculate_squid_game(df, current_gw)
+        won_cycles = [h for h in squid_history if h["winner_idx"] == m_idx]
+        prize_balance = sum(h["bank"] for h in won_cycles)
+
+        # Статус взноса из админ-таблицы (по FPL Team ID)
+        payment_status = payment_map.get(int(m["team_id"]), "н/д")
+
+        st.subheader(f"{m['team_name']}")
+        w1, w2, w3, w4 = st.columns(4)
+        w1.metric("Лига", m["league_tier"])
+        w2.metric("Очки за сезон 2025", int(m["total_pts"]))
+        w3.metric(
+            "Виртуальный баланс призовых",
+            f"{prize_balance:,} ₸".replace(",", " "),
+        )
+        w4.metric("Статус взноса", payment_status)
+
+        if won_cycles:
+            st.markdown("**Выигранные циклы Squid Game:**")
+            for h in won_cycles:
+                bank_str = f"{h['bank']:,} ₸".replace(",", " ")
+                st.markdown(
+                    f"- Цикл №{h['cycle']} (GW{h['start_gw']}–GW{h['end_gw']}) "
+                    f"— {bank_str}"
+                )
+        else:
+            st.caption(
+                f"Выигранных циклов Squid Game к GW{current_gw} пока нет."
+            )
