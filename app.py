@@ -355,6 +355,33 @@ def render_cup_table(cup_df: pd.DataFrame):
     st.dataframe(table, use_container_width=True)
 
 
+# ---------- Модуль «Игра в кальмара» ----------
+
+SQUID_BANK_PER_GW = 1000  # тенге за каждый сыгранный тур
+
+
+def calculate_squid_game(df: pd.DataFrame, gw: int):
+    """Раунд «Игры в кальмара» по выбранному туру.
+
+    Возвращает (data, average_pts, bank):
+    - data: копия df с колонками gw_pts (очки за тур) и squid_status;
+    - строго меньше среднего -> DEAD, больше или равно -> ALIVE;
+    - bank: банк раунда в тенге (номер тура * SQUID_BANK_PER_GW).
+    """
+    data = df.copy()
+    col = gw_col(gw)
+    if col in data.columns:
+        data["gw_pts"] = data[col]
+    else:
+        data["gw_pts"] = 0
+    average_pts = float(data["gw_pts"].mean()) if len(data) else 0.0
+    data["squid_status"] = data["gw_pts"].apply(
+        lambda p: "🟢 ALIVE" if p >= average_pts else "💀 DEAD"
+    )
+    bank = gw * SQUID_BANK_PER_GW
+    return data, average_pts, bank
+
+
 # ---------- Выбор источника данных ----------
 
 st.sidebar.header("Источник данных")
@@ -406,13 +433,14 @@ else:
 if df.empty:
     st.stop()
 
-# Текущий тур: определяем по данным, с возможностью симуляции для тестов
+# Игровой тур: слайдер 1–38, по умолчанию — последний тур в данных.
+# Управляет и фазой еврокубков, и раундом «Игры в кальмара».
 auto_gw = detect_current_gw(df)
-current_gw = st.sidebar.number_input(
-    "Текущий тур (симуляция для тестов)",
-    min_value=0,
+current_gw = st.sidebar.slider(
+    "Игровой тур (GW)",
+    min_value=1,
     max_value=38,
-    value=auto_gw,
+    value=min(max(auto_gw, 1), 38),
 )
 
 # ---------- Расчёт общих очков ----------
@@ -441,7 +469,9 @@ def league_table(data: pd.DataFrame, tier: str) -> pd.DataFrame:
 
 # ---------- Вывод: вкладки ----------
 
-tab_leagues, tab_cups = st.tabs(["🏆 Лиги", "🌍 Еврокубки"])
+tab_leagues, tab_cups, tab_squid = st.tabs(
+    ["🏆 Лиги", "🌍 Еврокубки", "🦑 Squid Game"]
+)
 
 with tab_leagues:
     for league_name in ALL_LEAGUES:
@@ -479,3 +509,39 @@ with tab_cups:
         render_cup_table(cl_df)
         st.header("Лига Конференций")
         render_cup_table(conf_df)
+
+with tab_squid:
+    squid_df, average_pts, bank = calculate_squid_game(df, current_gw)
+    alive_count = (squid_df["squid_status"] == "🟢 ALIVE").sum()
+    dead_count = (squid_df["squid_status"] == "💀 DEAD").sum()
+
+    st.header(f"🦑 Squid Game — GW{current_gw}")
+    st.caption(
+        "Набрал за тур строго меньше среднего — выбыл. "
+        "Набрал средний балл или выше — жив."
+    )
+
+    # Шапка в стиле постера: ⭕ △ ▢
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("🟢 Живых", int(alive_count))
+    m2.metric("💀 Мёртвых", int(dead_count))
+    m3.metric("Средний балл тура", f"{average_pts:.2f}")
+    m4.metric("Банк", f"{bank:,} ₸".replace(",", " "))
+
+    squid_table = (
+        squid_df.sort_values("gw_pts", ascending=False)
+        .reset_index(drop=True)[
+            ["team_name", "manager_name", "league_tier", "gw_pts", "squid_status"]
+        ]
+        .rename(
+            columns={
+                "team_name": "Команда",
+                "manager_name": "Менеджер",
+                "league_tier": "Лига",
+                "gw_pts": f"Очки GW{current_gw}",
+                "squid_status": "Статус",
+            }
+        )
+    )
+    squid_table.index = squid_table.index + 1
+    st.dataframe(squid_table, use_container_width=True)
