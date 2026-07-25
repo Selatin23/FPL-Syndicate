@@ -357,29 +357,91 @@ def render_cup_table(cup_df: pd.DataFrame):
 
 # ---------- Модуль «Игра в кальмара» ----------
 
-SQUID_BANK_PER_GW = 1000  # тенге за каждый сыгранный тур
+SQUID_BANK_PER_GW = 1000  # тенге, прирост банка цикла за каждый тур
 
 
-def calculate_squid_game(df: pd.DataFrame, gw: int):
-    """Раунд «Игры в кальмара» по выбранному туру.
+def calculate_squid_game(df: pd.DataFrame, current_gw: int):
+    """Последовательная симуляция циклов «Игры в кальмара» с GW1 по current_gw.
 
-    Возвращает (data, average_pts, bank):
-    - data: копия df с колонками gw_pts (очки за тур) и squid_status;
-    - строго меньше среднего -> DEAD, больше или равно -> ALIVE;
-    - bank: банк раунда в тенге (номер тура * SQUID_BANK_PER_GW).
+    Правила:
+    - цикл стартует со всеми участниками ALIVE и банком 0;
+    - каждый тур банк цикла растёт на SQUID_BANK_PER_GW;
+    - средний балл тура считается строго среди живых; кто набрал строго
+      меньше среднего — DEAD;
+    - если выживших осталось 1 (или 0 — защитный случай), цикл завершается,
+      победитель забирает банк, со следующего тура — новый цикл;
+    - равные результаты не прерывают игру: дуэль тянется в следующие туры;
+    - на GW38 при нескольких выживших побеждает лучший балл GW38.
+
+    Возвращает (history, last_round):
+    - history: список завершённых циклов
+      [{cycle, winner_idx, bank, start_gw, end_gw}, ...]
+    - last_round: словарь состояния последнего рассчитанного тура.
     """
-    data = df.copy()
-    col = gw_col(gw)
-    if col in data.columns:
-        data["gw_pts"] = data[col]
-    else:
-        data["gw_pts"] = 0
-    average_pts = float(data["gw_pts"].mean()) if len(data) else 0.0
-    data["squid_status"] = data["gw_pts"].apply(
-        lambda p: "🟢 ALIVE" if p >= average_pts else "💀 DEAD"
-    )
-    bank = gw * SQUID_BANK_PER_GW
-    return data, average_pts, bank
+    history = []
+    alive = list(df.index)
+    cycle_num = 1
+    cycle_start = 1
+    bank = 0
+    last_round = None
+
+    for gw in range(1, current_gw + 1):
+        col = gw_col(gw)
+        if col in df.columns:
+            pts = df[col]
+        else:
+            pts = pd.Series(0, index=df.index)
+
+        bank += SQUID_BANK_PER_GW
+        alive_pts = pts.loc[alive]
+        avg = float(alive_pts.mean()) if len(alive) else 0.0
+        survivors = list(alive_pts[alive_pts >= avg].index)
+        dead_now = [i for i in alive if i not in set(survivors)]
+
+        # Определение победителя цикла
+        winner_idx = None
+        if len(survivors) == 1:
+            winner_idx = survivors[0]
+        elif len(survivors) == 0 and alive:
+            # Математически недостижимо (максимум всегда >= среднего),
+            # но страхуемся: побеждает лучший балл тура среди живых
+            winner_idx = alive_pts.idxmax()
+        elif gw == 38 and len(survivors) > 1:
+            # Финал сезона: среди выживших побеждает лучший балл GW38
+            winner_idx = pts.loc[survivors].idxmax()
+
+        last_round = {
+            "gw": gw,
+            "avg": avg,
+            "cycle_num": cycle_num,
+            "cycle_start": cycle_start,
+            "step": gw - cycle_start + 1,
+            "bank": bank,
+            "alive_before": list(alive),
+            "survivors": survivors,
+            "dead_now": dead_now,
+            "winner_idx": winner_idx,
+        }
+
+        if winner_idx is not None:
+            history.append(
+                {
+                    "cycle": cycle_num,
+                    "winner_idx": winner_idx,
+                    "bank": bank,
+                    "start_gw": cycle_start,
+                    "end_gw": gw,
+                }
+            )
+            # Перезапуск: новый цикл со следующего тура
+            alive = list(df.index)
+            cycle_num += 1
+            cycle_start = gw + 1
+            bank = 0
+        else:
+            alive = survivors
+
+    return history, last_round
 
 
 # ---------- Выбор источника данных ----------
@@ -511,37 +573,108 @@ with tab_cups:
         render_cup_table(conf_df)
 
 with tab_squid:
-    squid_df, average_pts, bank = calculate_squid_game(df, current_gw)
-    alive_count = (squid_df["squid_status"] == "🟢 ALIVE").sum()
-    dead_count = (squid_df["squid_status"] == "💀 DEAD").sum()
+    history, last_round = calculate_squid_game(df, current_gw)
 
-    st.header(f"🦑 Squid Game — GW{current_gw}")
-    st.caption(
-        "Набрал за тур строго меньше среднего — выбыл. "
-        "Набрал средний балл или выше — жив."
-    )
+    if last_round is None:
+        st.info("Нет данных для расчёта.")
+    else:
+        gw = last_round["gw"]
+        cycle_completed = last_round["winner_idx"] is not None
 
-    # Шапка в стиле постера: ⭕ △ ▢
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("🟢 Живых", int(alive_count))
-    m2.metric("💀 Мёртвых", int(dead_count))
-    m3.metric("Средний балл тура", f"{average_pts:.2f}")
-    m4.metric("Банк", f"{bank:,} ₸".replace(",", " "))
-
-    squid_table = (
-        squid_df.sort_values("gw_pts", ascending=False)
-        .reset_index(drop=True)[
-            ["team_name", "manager_name", "league_tier", "gw_pts", "squid_status"]
-        ]
-        .rename(
-            columns={
-                "team_name": "Команда",
-                "manager_name": "Менеджер",
-                "league_tier": "Лига",
-                "gw_pts": f"Очки GW{current_gw}",
-                "squid_status": "Статус",
-            }
+        st.header(f"🦑 Squid Game — GW{gw}")
+        st.caption(
+            "Средний балл считается среди живых. Набрал строго меньше "
+            "среднего — выбыл. Последний выживший забирает банк цикла, "
+            "и игра перезапускается со всеми участниками."
         )
-    )
-    squid_table.index = squid_table.index + 1
-    st.dataframe(squid_table, use_container_width=True)
+
+        # --- Шапка текущего цикла ---
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric(
+            "Цикл",
+            f"№{last_round['cycle_num']}, Шаг {last_round['step']}",
+        )
+        m2.metric("🟢 Живых", len(last_round["survivors"]))
+        m3.metric("Средний балл тура", f"{last_round['avg']:.2f}")
+        m4.metric(
+            "Банк цикла",
+            f"{last_round['bank']:,} ₸".replace(",", " "),
+        )
+
+        if cycle_completed:
+            winner_row = df.loc[last_round["winner_idx"]]
+            st.success(
+                f"Цикл №{last_round['cycle_num']} завершён на GW{gw}! "
+                f"Победитель — {winner_row['team_name']} "
+                f"({winner_row['manager_name']}), банк "
+                f"{last_round['bank']:,} ₸".replace(",", " ")
+                + f". Со следующего тура стартует новый цикл: все 160 "
+                "участников снова в игре, банк обнуляется."
+            )
+
+        # --- Победители прошлых циклов ---
+        if history:
+            st.subheader("Победители прошлых циклов")
+            hist_rows = []
+            for h in history:
+                w = df.loc[h["winner_idx"]]
+                hist_rows.append(
+                    {
+                        "Цикл": h["cycle"],
+                        "Победитель": w["manager_name"],
+                        "Команда": w["team_name"],
+                        "Лига": w["league_tier"],
+                        "Туры": f"GW{h['start_gw']}–GW{h['end_gw']}",
+                        "Банк": f"{h['bank']:,} ₸".replace(",", " "),
+                    }
+                )
+            hist_df = pd.DataFrame(hist_rows).set_index("Цикл")
+            st.dataframe(hist_df, use_container_width=True)
+
+        # --- Таблица участников текущего тура ---
+        st.subheader(f"Участники тура GW{gw} (цикл №{last_round['cycle_num']})")
+        col = gw_col(gw)
+        table = df.copy()
+        table["gw_pts"] = table[col] if col in table.columns else 0
+
+        survivors_set = set(last_round["survivors"])
+        dead_now_set = set(last_round["dead_now"])
+        winner_idx = last_round["winner_idx"]
+
+        def squid_status(idx):
+            if idx == winner_idx:
+                return "🏆 WINNER"
+            if idx in survivors_set:
+                return "ALIVE"
+            if idx in dead_now_set:
+                return "DEAD"
+            return "DEAD (ранее)"
+
+        table["Статус"] = [squid_status(i) for i in table.index]
+        table = (
+            table.sort_values("gw_pts", ascending=False)
+            .reset_index(drop=True)[
+                ["team_name", "manager_name", "league_tier", "gw_pts", "Статус"]
+            ]
+            .rename(
+                columns={
+                    "team_name": "Команда",
+                    "manager_name": "Менеджер",
+                    "league_tier": "Лига",
+                    "gw_pts": f"Очки GW{gw}",
+                }
+            )
+        )
+        table.index = table.index + 1
+
+        def color_status(val):
+            if "WINNER" in val:
+                return "background-color: #FFD700; color: #000000"
+            if val == "ALIVE":
+                return "background-color: #1E7A46; color: #FFFFFF"
+            return "background-color: #8B1E1E; color: #FFFFFF"
+
+        st.dataframe(
+            table.style.map(color_status, subset=["Статус"]),
+            use_container_width=True,
+        )
