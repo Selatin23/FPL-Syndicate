@@ -13,9 +13,13 @@ GW_COLS = ["gw1_pts", "gw2_pts", "gw3_pts"]
 
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
 
+# Все лиги турнира в иерархическом порядке — выводятся по мере наполнения
+ALL_LEAGUES = ["Premier League", "A-1", "A-2", "B-1", "B-2", "B-3", "C", "D"]
+
 # Ссылка на опубликованный CSV админ-панели (File -> Share -> Publish to web -> CSV)
 CSV_URL = (
-    "https://docs.google.com/spreadsheets/d/e/2PACX-1vS8jhaEpFQVR8Sk78GKDUuUHjBwZT55ybatubqw7pPT48Vz7pLo_YWyKtek6dCuo4dS1R9V_tlJrFKH/pub?output=csv"
+    "https://docs.google.com/spreadsheets/d/e/"
+    "2PACX-1vTEST_PLACEHOLDER_ID/pub?gid=0&single=true&output=csv"
 )
 
 ADMIN_REQUIRED_COLS = [
@@ -214,8 +218,8 @@ def league_table(data: pd.DataFrame, tier: str) -> pd.DataFrame:
     return table[DISPLAY_COLS]
 
 
-st.header("Premier League")
-st.dataframe(league_table(df, "Premier League"), use_container_width=True)
-
-st.header("A-1")
-st.dataframe(league_table(df, "A-1"), use_container_width=True)
+for league_name in ALL_LEAGUES:
+    league_df = league_table(df, league_name)
+    if not league_df.empty:
+        st.header(league_name)
+        st.dataframe(league_df, use_container_width=True)
