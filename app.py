@@ -15,8 +15,7 @@ FPL_BASE_URL = "https://fantasy.premierleague.com/api"
 
 # Ссылка на опубликованный CSV админ-панели (File -> Share -> Publish to web -> CSV)
 CSV_URL = (
-    "https://docs.google.com/spreadsheets/d/e/"
-    "2PACX-1vTEST_PLACEHOLDER_ID/pub?gid=0&single=true&output=csv"
+    "https://docs.google.com/spreadsheets/d/e/2PACX-1vS8jhaEpFQVR8Sk78GKDUuUHjBwZT55ybatubqw7pPT48Vz7pLo_YWyKtek6dCuo4dS1R9V_tlJrFKH/pub?output=csv"
 )
 
 ADMIN_REQUIRED_COLS = [
