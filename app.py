@@ -22,9 +22,9 @@ TEAM_TIER_MAP = {
     50220: "A-1",
     51764: "A-2",
     91928: "Premier League",
-    158533: "A-1",
-    215432: "A-1",
-    86083: "Premier League",
+    158533: "B-1",
+    215432: "B-2",
+    860834: "Premier League",
 }
 
 
