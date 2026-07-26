@@ -1,5 +1,8 @@
+import base64
 import os
 import re
+import uuid
+from datetime import datetime, timezone
 
 import pandas as pd
 import requests
@@ -93,6 +96,47 @@ st.markdown(
     .fpl-table a { text-decoration: none; font-weight: 600; }
     .fpl-table a:hover { text-decoration: underline; }
     .fpl-wrap { overflow-x: auto; }
+
+    /* Карточки постов социальной ленты */
+    .fpl-post-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.4rem;
+        margin-bottom: 0.35rem;
+    }
+    .fpl-avatar {
+        width: 2rem; height: 2rem;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center; justify-content: center;
+        font-size: 0.85rem; font-weight: 700;
+        background: rgba(0, 223, 122, 0.18);
+        border: 1px solid rgba(0, 223, 122, 0.45);
+        flex: 0 0 auto;
+    }
+    .fpl-author { font-weight: 700; font-size: 0.92rem; }
+    .fpl-badge {
+        display: inline-block;
+        padding: 0.1rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.7rem; font-weight: 600;
+        border: 1px solid rgba(128, 128, 128, 0.35);
+        background: rgba(128, 128, 128, 0.12);
+        white-space: nowrap;
+    }
+    .fpl-badge-ok {
+        background: rgba(0, 223, 122, 0.16);
+        border-color: rgba(0, 223, 122, 0.5);
+    }
+    .fpl-post-meta { font-size: 0.72rem; opacity: 0.62; }
+    .fpl-post-body {
+        font-size: 0.92rem;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin: 0.25rem 0 0.15rem 0;
+    }
 
     /* Футер */
     .fpl-footer {
@@ -322,9 +366,10 @@ def load_mock_data(path: str) -> pd.DataFrame:
 @st.cache_data(ttl=60)
 def load_admin_sheet(url: str):
     """Читает опубликованный CSV и возвращает
-    (team_ids, team_tier_map, payment_map, league_id_map).
+    (team_ids, team_tier_map, payment_map, league_id_map, pin_map).
 
     league_id_map: {League_Tier: League_ID} — ID H2H-лиги в FPL.
+    pin_map: {Manager_Name: последние 4 цифры телефона} — для верификации.
     """
     admin_df = pd.read_csv(url)
 
@@ -361,7 +406,17 @@ def load_admin_sheet(url: str):
             if not valid.empty:
                 league_id_map[tier] = int(valid.iloc[0])
 
-    return team_ids, team_tier_map, payment_map, league_id_map
+    # PIN = последние 4 цифры телефона. Сам номер наружу не отдаём.
+    pin_map = {}
+    for manager, phone in zip(
+        admin_df["Manager_Name"].astype(str).str.strip(),
+        admin_df["Phone_Number"].astype(str),
+    ):
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) >= 4 and manager:
+            pin_map[manager] = digits[-4:]
+
+    return team_ids, team_tier_map, payment_map, league_id_map, pin_map
 
 
 # ---------- Загрузка из FPL API ----------
@@ -954,6 +1009,144 @@ def prize_fund_summary() -> pd.DataFrame:
     return summary
 
 
+# ---------- Модуль «Сообщество»: слой данных ----------
+
+POST_CATEGORIES = ["😂 Мем", "📊 Аналитика/Состав", "📢 Объявление", "💬 Чат"]
+POSTS_TABLE = "posts"
+MAX_IMAGE_BYTES = 300_000  # ~300 КБ: картинка кодируется в base64 и лежит в строке
+
+
+def supabase_config():
+    """(url, key) из st.secrets или (None, None), если секреты не настроены."""
+    try:
+        cfg = st.secrets["supabase"]
+        url = str(cfg["SUPABASE_URL"]).rstrip("/")
+        key = str(cfg["SUPABASE_KEY"])
+        if url and key:
+            return url, key
+    except Exception:
+        pass
+    return None, None
+
+
+def _sb_headers(key: str, extra: dict | None = None) -> dict:
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def fetch_posts() -> list[dict]:
+    """Все посты: из Supabase или из session_state в демо-режиме."""
+    url, key = supabase_config()
+    if not url:
+        return list(st.session_state.get("demo_posts", []))
+    try:
+        resp = requests.get(
+            f"{url}/rest/v1/{POSTS_TABLE}",
+            headers=_sb_headers(key),
+            params={"select": "*", "order": "created_at.desc", "limit": "300"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.exceptions.RequestException, ValueError) as e:
+        st.warning(f"Не удалось загрузить ленту из Supabase: {e}")
+        return list(st.session_state.get("demo_posts", []))
+
+
+def insert_post(post: dict) -> bool:
+    """Публикует пост. True — успех."""
+    url, key = supabase_config()
+    if not url:
+        st.session_state.setdefault("demo_posts", []).insert(0, post)
+        return True
+    try:
+        resp = requests.post(
+            f"{url}/rest/v1/{POSTS_TABLE}",
+            headers=_sb_headers(key, {"Prefer": "return=minimal"}),
+            json=post,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as e:
+        st.error(f"Не удалось опубликовать пост: {e}")
+        return False
+
+
+def like_post(post_id: str, current_likes: int) -> bool:
+    """Инкремент лайка (read-modify-write — для лиги на 160 человек достаточно)."""
+    url, key = supabase_config()
+    if not url:
+        for p in st.session_state.get("demo_posts", []):
+            if str(p.get("id")) == str(post_id):
+                p["likes"] = int(p.get("likes", 0)) + 1
+        return True
+    try:
+        resp = requests.patch(
+            f"{url}/rest/v1/{POSTS_TABLE}",
+            headers=_sb_headers(key, {"Prefer": "return=minimal"}),
+            params={"id": f"eq.{post_id}"},
+            json={"likes": int(current_likes) + 1},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as e:
+        st.error(f"Не удалось поставить лайк: {e}")
+        return False
+
+
+def encode_image(uploaded_file) -> tuple[str | None, str | None]:
+    """Кодирует загруженную картинку в data URL. Возвращает (data_url, ошибка)."""
+    if uploaded_file is None:
+        return None, None
+    raw = uploaded_file.getvalue()
+    if len(raw) > MAX_IMAGE_BYTES:
+        return None, (
+            f"Файл {len(raw) // 1024} КБ — слишком большой "
+            f"(лимит {MAX_IMAGE_BYTES // 1024} КБ). Сожми картинку "
+            "или вставь ссылку на неё."
+        )
+    mime = uploaded_file.type or "image/png"
+    return f"data:{mime};base64,{base64.b64encode(raw).decode()}", None
+
+
+def render_post_image(image_ref: str):
+    """Показывает картинку поста: data URL или обычная ссылка."""
+    if not image_ref:
+        return
+    try:
+        if image_ref.startswith("data:"):
+            payload = image_ref.split(",", 1)[1]
+            st.image(base64.b64decode(payload), use_container_width=True)
+        else:
+            st.image(image_ref, use_container_width=True)
+    except Exception:
+        st.caption("🖼️ Картинку не удалось отобразить.")
+
+
+def sort_posts(posts: list[dict], mode: str, gw: int) -> list[dict]:
+    """Фильтрация и сортировка ленты."""
+    def likes(p):
+        return int(p.get("likes") or 0)
+
+    def created(p):
+        return str(p.get("created_at") or "")
+
+    if mode == "🔥 Топ за тур":
+        subset = [p for p in posts if int(p.get("gw") or 0) == gw]
+        return sorted(subset, key=lambda p: (likes(p), created(p)), reverse=True)
+    if mode == "🏆 Топ за всё время":
+        return sorted(posts, key=lambda p: (likes(p), created(p)), reverse=True)
+    return sorted(posts, key=created, reverse=True)  # ⏱️ Свежее
+
+
 # ---------- Выбор источника данных ----------
 
 if os.path.exists(LOGO_FILE):
@@ -992,15 +1185,15 @@ if data_source == "Данные сезона 2025 (Excel)":
 
     # Статусы взносов подтягиваем из админ-таблицы; её недоступность не критична
     try:
-        _, _, payment_map, _ = load_admin_sheet(CSV_URL)
+        _, _, payment_map, _, pin_map = load_admin_sheet(CSV_URL)
     except Exception:
-        payment_map = {}
+        payment_map, pin_map = {}, {}
     # Реальные H2H-матчи относятся к текущему сезону, а в Excel — прошлый,
     # поэтому здесь всегда используем сгенерированный календарь.
     h2h_matches_by_tier = {}
 else:
     try:
-        team_ids, team_tier_map, payment_map, league_id_map = (
+        team_ids, team_tier_map, payment_map, league_id_map, pin_map = (
             load_admin_sheet(CSV_URL)
         )
     except Exception as e:
@@ -1213,8 +1406,11 @@ METRICS_PER_ROW = 2 if compact else 4
 
 # ---------- Вывод: вкладки ----------
 
-tab_leagues, tab_cups, tab_squid, tab_fame, tab_wallet = st.tabs(
-    ["🏆 Лиги", "🌍 Еврокубки", "🦑 Squid Game", "🏅 Зал Славы", "💰 Финансы"]
+(
+    tab_leagues, tab_cups, tab_squid, tab_fame, tab_wallet, tab_social
+) = st.tabs(
+    ["🏆 Лиги", "🌍 Еврокубки", "🦑 Squid Game", "🏅 Зал Славы", "💰 Финансы",
+     "💬 Сообщество"]
 )
 
 with tab_leagues:
@@ -1575,6 +1771,161 @@ with tab_wallet:
         )
         + "."
     )
+
+
+with tab_social:
+    st.session_state.setdefault("liked_posts", set())
+    st.session_state.setdefault("demo_posts", [])
+
+    sb_url, _sb_key = supabase_config()
+    if not sb_url:
+        st.warning(
+            "⚠️ Работает в локальном демо-режиме: посты и лайки хранятся "
+            "только в этой сессии и исчезнут при перезагрузке. Добавь ключи "
+            "Supabase в `.streamlit/secrets.toml`, чтобы включить сохранение."
+        )
+
+    # --- Форма публикации с верификацией автора ---
+    with st.expander("✍️ Написать пост / Опубликовать мем", expanded=False):
+        if not pin_map:
+            st.error(
+                "Список участников 2026 недоступен (не загрузилась "
+                "админ-таблица), поэтому верификация авторов не работает "
+                "и публикация закрыта."
+            )
+        else:
+            managers = sorted(pin_map.keys())
+            author = st.selectbox("Автор (участник 2026)", options=managers)
+            pin = st.text_input(
+                "Введи PIN-код (последние 4 цифры вашего номера телефона)",
+                type="password",
+                max_chars=4,
+            )
+
+            expected = pin_map.get(author)
+            verified = bool(pin) and pin.strip() == expected
+            if verified:
+                st.session_state["verified_manager"] = author
+                st.success("✅ Автор верифицирован")
+            elif pin:
+                st.session_state.pop("verified_manager", None)
+                st.error("❌ Неверный PIN-код")
+            else:
+                st.caption("Введи PIN, чтобы активировать публикацию.")
+
+            category = st.radio(
+                "Категория",
+                options=POST_CATEGORIES,
+                horizontal=not compact,
+            )
+            body = st.text_area("Текст сообщения", height=110)
+
+            upload = st.file_uploader(
+                "Прикрепить скриншот/мем",
+                type=["png", "jpg", "jpeg"],
+            )
+            image_url_input = st.text_input(
+                "…или вставь ссылку на картинку",
+                placeholder="https://...",
+            )
+
+            if st.button(
+                "Опубликовать 🚀", type="primary", disabled=not verified
+            ):
+                image_ref, img_error = encode_image(upload)
+                if img_error:
+                    st.error(img_error)
+                elif not image_ref and image_url_input.strip():
+                    image_ref = image_url_input.strip()
+
+                if not body.strip() and not image_ref:
+                    st.error("Пост пустой — добавь текст или картинку.")
+                elif img_error is None:
+                    post = {
+                        "id": str(uuid.uuid4()),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "manager_name": author,
+                        "category": category,
+                        "body": body.strip(),
+                        "image_url": image_ref,
+                        "gw": int(current_gw),
+                        "likes": 0,
+                        "verified": True,
+                    }
+                    if insert_post(post):
+                        st.success("Опубликовано 🚀")
+                        st.rerun()
+
+    # --- Лента ---
+    feed_mode = st.radio(
+        "Сортировка",
+        options=["⏱️ Свежее", "🔥 Топ за тур", "🏆 Топ за всё время"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    posts = sort_posts(fetch_posts(), feed_mode, current_gw)
+
+    if not posts:
+        st.info(
+            "Пока ни одного поста. Открой форму выше и стань первым 🚀"
+            if feed_mode != "🔥 Топ за тур"
+            else f"За GW{current_gw} постов пока нет."
+        )
+    else:
+        st.caption(f"Постов в ленте: {len(posts)}")
+
+    for post in posts:
+        post_id = str(post.get("id", ""))
+        author = str(post.get("manager_name", "—"))
+        likes = int(post.get("likes") or 0)
+        created_raw = str(post.get("created_at") or "")
+        stamp = created_raw[:16].replace("T", " ")
+        post_gw = post.get("gw")
+        initials = "".join(w[0] for w in author.split()[:2]).upper() or "?"
+
+        with st.container(border=True):
+            verified_badge = (
+                '<span class="fpl-badge fpl-badge-ok">✅ Автор верифицирован</span>'
+                if post.get("verified")
+                else ""
+            )
+            gw_badge = (
+                f'<span class="fpl-badge">GW{int(post_gw)}</span>'
+                if post_gw else ""
+            )
+            st.markdown(
+                f"""
+                <div class="fpl-post-head">
+                    <span class="fpl-avatar">{initials}</span>
+                    <span class="fpl-author">{author}</span>
+                    <span class="fpl-badge">{post.get("category", "💬 Чат")}</span>
+                    {gw_badge}
+                    {verified_badge}
+                </div>
+                <div class="fpl-post-meta">{stamp}</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if post.get("body"):
+                st.markdown(
+                    f'<div class="fpl-post-body">{post["body"]}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            render_post_image(post.get("image_url"))
+
+            already_liked = post_id in st.session_state["liked_posts"]
+            if st.button(
+                f"❤️ {likes}",
+                key=f"like_{post_id}",
+                disabled=already_liked,
+                help="Лайк можно поставить один раз за сессию",
+            ):
+                if like_post(post_id, likes):
+                    st.session_state["liked_posts"].add(post_id)
+                    st.rerun()
 
 
 st.markdown(
