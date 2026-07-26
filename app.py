@@ -8,6 +8,26 @@ st.set_page_config(page_title="FPL Syndicate", layout="wide")
 
 st.title("FPL Syndicate")
 
+# Адаптация под мобильные: убираем лишние поля, ужимаем метрики и таблицы
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 2.8rem;
+        padding-left: 0.8rem;
+        padding-right: 0.8rem;
+    }
+    [data-testid="stMetricValue"] { font-size: 1.35rem; }
+    [data-testid="stMetricLabel"] { font-size: 0.8rem; }
+    [data-testid="stMetricDelta"] { font-size: 0.75rem; }
+    [data-testid="stHeader"] { height: 2.5rem; }
+    div[data-testid="stDataFrame"] { font-size: 0.85rem; }
+    button[data-baseweb="tab"] { padding: 0.4rem 0.6rem; font-size: 0.9rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 EXCEL_FILE = "Teams_2025.xlsx"
 
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
@@ -48,6 +68,29 @@ QUALIFICATION_END_GW = 20  # квалификация длится до этог
 ELIMINATION_GWS = [25, 30, 35]  # контрольные точки отсева
 ELIMINATED_PER_ROUND = 20       # сколько команд выбывает на каждой точке
 FINAL_START_GW, FINAL_END_GW = 36, 38
+
+# ---------- Призовая сетка сезона (итого 1 600 000 ₸) ----------
+
+PRIZE_FUND_TOTAL = 1_600_000
+
+# Лиги H2H: в каждой из 8 лиг
+PRIZE_LEAGUE = {1: 100_000, 2: 40_000, 3: 10_000}          # 8 x 150 000 = 1 200 000
+
+# Общий зачёт среди всех 160 команд
+PRIZE_ABSOLUTE = {1: 40_000, 2: 20_000, 3: 10_000}         # 70 000
+
+# Еврокубки и Кубок (в сумме 150 000, чтобы фонд сошёлся к 1.6 млн)
+PRIZE_CL_WINNER = 70_000       # Лига Чемпионов
+PRIZE_CONF_WINNER = 40_000     # Лига Конференций
+PRIZE_CUP_WINNER = 40_000      # Кубок
+
+# Специальные номинации
+PRIZE_SQUID_TOTAL = 57_000     # Squid Game: 1 500 x 38 туров
+PRIZE_MOM_TOTAL = 50_000       # Лучший TM месяца: 5 000 x 10 месяцев
+PRIZE_MAX_PTS = 20_000         # Рекорд очков за тур
+PRIZE_BEST_CAP = 20_000        # Лучший капитан/вице
+PRIZE_EXPENSIVE_TEAM = 20_000  # Самая дорогая команда
+PRIZE_MIN_TRANSFERS = 13_000   # Минимум трансферов
 
 
 # ---------- Утилиты по турам ----------
@@ -364,7 +407,7 @@ def render_cup_table(cup_df: pd.DataFrame):
 
 # ---------- Модуль «Игра в кальмара» ----------
 
-SQUID_BANK_PER_GW = 1000  # тенге, прирост банка цикла за каждый тур
+SQUID_BANK_PER_GW = 1500  # тенге за тур: 38 туров x 1 500 = 57 000 ₸ за сезон
 
 
 def calculate_squid_game(df: pd.DataFrame, current_gw: int):
@@ -497,6 +540,114 @@ def calculate_hall_of_fame(df: pd.DataFrame):
     return record, champion, leaders
 
 
+# ---------- Расчёт призовых выплат ----------
+
+def calculate_prizes(df: pd.DataFrame, current_gw: int) -> dict:
+    """Начисляет призовые по всем рассчитываемым категориям.
+
+    Возвращает {index команды: [(категория, сумма), ...]}.
+    Категории без данных в файле (TM месяца, капитаны, стоимость состава,
+    трансферы, Кубок) здесь не начисляются — см. PRIZE_PENDING.
+    """
+    payouts: dict = {i: [] for i in df.index}
+
+    def award(idx, category, amount):
+        payouts[idx].append((category, int(amount)))
+
+    totals = sum_gw_range(df, 1, current_gw)
+
+    # 1. Призовые мест в лигах H2H (по итоговому тоталу внутри лиги)
+    for league in ALL_LEAGUES:
+        league_idx = df[df["league_tier"] == league].index
+        ranked = totals.loc[league_idx].sort_values(ascending=False)
+        for place, prize in PRIZE_LEAGUE.items():
+            if len(ranked) >= place:
+                award(
+                    ranked.index[place - 1],
+                    f"Лига {league} — {place} место",
+                    prize,
+                )
+
+    # 2. Общий зачёт среди всех команд
+    ranked_abs = totals.sort_values(ascending=False)
+    for place, prize in PRIZE_ABSOLUTE.items():
+        if len(ranked_abs) >= place:
+            award(
+                ranked_abs.index[place - 1],
+                f"Общий зачёт — {place} место",
+                prize,
+            )
+
+    # 3. Squid Game: банки выигранных циклов
+    squid_history, _ = calculate_squid_game(df, current_gw)
+    for h in squid_history:
+        award(
+            h["winner_idx"],
+            f"Squid Game — цикл №{h['cycle']} (GW{h['start_gw']}–{h['end_gw']})",
+            h["bank"],
+        )
+
+    # 4. Еврокубки: победители определяются после GW38
+    if current_gw > QUALIFICATION_END_GW:
+        mode, payload = calculate_european_cups(df, current_gw)
+        if mode == "tournament":
+            cl_df, conf_df = payload
+            cl_winner = cl_df[cl_df["status"] == "Победитель 🏆"]
+            if not cl_winner.empty:
+                award(cl_winner.index[0], "Лига Чемпионов — победитель",
+                      PRIZE_CL_WINNER)
+            conf_winner = conf_df[conf_df["status"] == "Победитель 🏆"]
+            if not conf_winner.empty:
+                award(conf_winner.index[0], "Лига Конференций — победитель",
+                      PRIZE_CONF_WINNER)
+
+    # 5. Рекорд очков за один тур
+    record, _, _ = calculate_hall_of_fame(df)
+    record_idx = df[
+        (df["manager_name"] == record["manager"])
+        & (df["team_name"] == record["team"])
+    ].index
+    if len(record_idx):
+        award(
+            record_idx[0],
+            f"Max pts — рекорд тура ({record['points']} в GW{record['gw']})",
+            PRIZE_MAX_PTS,
+        )
+
+    return payouts
+
+
+# Номинации, которые пока невозможно начислить из имеющихся данных
+PRIZE_PENDING = [
+    ("Лучший TM месяца", PRIZE_MOM_TOTAL, "нужна разбивка туров по месяцам"),
+    ("Best cap & vc", PRIZE_BEST_CAP, "нужны данные по капитанам из API"),
+    ("Самая дорогая команда", PRIZE_EXPENSIVE_TEAM,
+     "нужна стоимость составов (team_value из API)"),
+    ("Минимум трансферов", PRIZE_MIN_TRANSFERS,
+     "нужны данные по трансферам из API"),
+    ("Кубок", PRIZE_CUP_WINNER, "модуль Кубка ещё не реализован"),
+]
+
+
+def prize_fund_summary() -> pd.DataFrame:
+    """Сводка призового фонда для проверки, что всё сходится к 1.6 млн."""
+    rows = [
+        ("Лиги H2H (8 лиг: 100/40/10 тыс.)", 8 * sum(PRIZE_LEAGUE.values())),
+        ("Общий зачёт (40/20/10 тыс.)", sum(PRIZE_ABSOLUTE.values())),
+        ("Лига Чемпионов", PRIZE_CL_WINNER),
+        ("Лига Конференций", PRIZE_CONF_WINNER),
+        ("Кубок", PRIZE_CUP_WINNER),
+        ("Squid Game (1 500 x 38)", PRIZE_SQUID_TOTAL),
+        ("Лучший TM месяца (5 000 x 10)", PRIZE_MOM_TOTAL),
+        ("Max pts (рекорд тура)", PRIZE_MAX_PTS),
+        ("Best cap & vc", PRIZE_BEST_CAP),
+        ("Самая дорогая команда", PRIZE_EXPENSIVE_TEAM),
+        ("Минимум трансферов", PRIZE_MIN_TRANSFERS),
+    ]
+    summary = pd.DataFrame(rows, columns=["Категория", "Сумма, ₸"])
+    return summary
+
+
 # ---------- Выбор источника данных ----------
 
 st.sidebar.header("Источник данных")
@@ -595,10 +746,43 @@ selected_manager = st.sidebar.selectbox(
     options=sorted(df["manager_name"].astype(str).unique()),
 )
 
+st.sidebar.header("Отображение")
+compact = st.sidebar.toggle(
+    "📱 Компактный режим (телефон)",
+    value=True,
+    help="Меньше колонок в таблицах, метрики в два ряда.",
+)
+
+# Наборы колонок таблиц лиг: полный для десктопа, ужатый для телефона
+if compact:
+    last_gw_cols = gw_cols_display[-1:]  # только последний тур
+    DISPLAY_COLS = ["team_name"] + last_gw_cols + ["total_pts"]
+else:
+    DISPLAY_COLS = (
+        ["team_name", "manager_name"]
+        + gw_cols_display
+        + ["total_pts", "team_value"]
+    )
+
+
+def metric_grid(items, per_row):
+    """Раскладывает метрики сеткой: на телефоне 2 в ряд, на десктопе шире."""
+    for i in range(0, len(items), per_row):
+        cols = st.columns(per_row)
+        for col_widget, item in zip(cols, items[i:i + per_row]):
+            label, value, delta = item
+            if delta is None:
+                col_widget.metric(label, value)
+            else:
+                col_widget.metric(label, value, delta, delta_color="off")
+
+
+METRICS_PER_ROW = 2 if compact else 4
+
 # ---------- Вывод: вкладки ----------
 
 tab_leagues, tab_cups, tab_squid, tab_fame, tab_wallet = st.tabs(
-    ["🏆 Лиги", "🌍 Еврокубки", "🦑 Squid Game", "🏅 Зал Славы", "💰 Финансовый Хаб"]
+    ["🏆 Лиги", "🌍 Еврокубки", "🦑 Squid Game", "🏅 Зал Славы", "💰 Финансы"]
 )
 
 with tab_leagues:
@@ -620,9 +804,13 @@ with tab_cups:
             f"окончательным после GW{QUALIFICATION_END_GW}."
         )
         ranking = payload
-        qual_table = ranking[
-            ["team_name", "manager_name", "league_tier", "qual_pts", "Направление"]
-        ].rename(
+        qual_cols = (
+            ["team_name", "qual_pts", "Направление"]
+            if compact
+            else ["team_name", "manager_name", "league_tier", "qual_pts",
+                  "Направление"]
+        )
+        qual_table = ranking[qual_cols].rename(
             columns={
                 "team_name": "Команда",
                 "manager_name": "Менеджер",
@@ -633,10 +821,35 @@ with tab_cups:
         st.dataframe(qual_table, use_container_width=True)
     else:
         cl_df, conf_df = payload
+
+        if compact:
+            # На телефоне показываем только очки текущей фазы
+            if current_gw >= FINAL_START_GW:
+                phase_col, phase_name = "final_pts", "Финал (GW36–38)"
+            elif current_gw >= 31:
+                phase_col, phase_name = "seg_31_35", "GW31–35"
+            elif current_gw >= 26:
+                phase_col, phase_name = "seg_26_30", "GW26–30"
+            else:
+                phase_col, phase_name = "seg_21_25", "GW21–25"
+            cup_cols = {
+                "team_name": "Команда",
+                phase_col: phase_name,
+                "status": "Статус",
+            }
+        else:
+            cup_cols = CUP_DISPLAY_COLS
+
+        def render_cup(cup_df):
+            table = cup_df[list(cup_cols)].rename(columns=cup_cols)
+            table = table.reset_index(drop=True)
+            table.index = table.index + 1
+            st.dataframe(table, use_container_width=True)
+
         st.header("Лига Чемпионов")
-        render_cup_table(cl_df)
+        render_cup(cl_df)
         st.header("Лига Конференций")
-        render_cup_table(conf_df)
+        render_cup(conf_df)
 
 with tab_squid:
     history, last_round = calculate_squid_game(df, current_gw)
@@ -650,21 +863,17 @@ with tab_squid:
         st.header(f"🦑 Squid Game — GW{gw}")
         st.caption(
             "Средний балл считается среди живых. Набрал строго меньше "
-            "среднего — выбыл. Последний выживший забирает банк цикла, "
-            "и игра перезапускается со всеми участниками."
+            "среднего — выбыл. Последний выживший забирает банк цикла."
         )
 
-        # --- Шапка текущего цикла ---
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric(
-            "Цикл",
-            f"№{last_round['cycle_num']}, Шаг {last_round['step']}",
-        )
-        m2.metric("🟢 Живых", len(last_round["survivors"]))
-        m3.metric("Средний балл тура", f"{last_round['avg']:.2f}")
-        m4.metric(
-            "Банк цикла",
-            f"{last_round['bank']:,} ₸".replace(",", " "),
+        metric_grid(
+            [
+                ("Цикл", f"№{last_round['cycle_num']}, Шаг {last_round['step']}", None),
+                ("🟢 Живых", str(len(last_round["survivors"])), None),
+                ("Средний балл", f"{last_round['avg']:.2f}", None),
+                ("Банк цикла", f"{last_round['bank']:,} ₸".replace(",", " "), None),
+            ],
+            METRICS_PER_ROW,
         )
 
         if cycle_completed:
@@ -674,11 +883,9 @@ with tab_squid:
                 f"Победитель — {winner_row['team_name']} "
                 f"({winner_row['manager_name']}), банк "
                 f"{last_round['bank']:,} ₸".replace(",", " ")
-                + f". Со следующего тура стартует новый цикл: все 160 "
-                "участников снова в игре, банк обнуляется."
+                + ". Со следующего тура — новый цикл: все снова в игре."
             )
 
-        # --- Победители прошлых циклов ---
         if history:
             st.subheader("Победители прошлых циклов")
             hist_rows = []
@@ -688,17 +895,14 @@ with tab_squid:
                     {
                         "Цикл": h["cycle"],
                         "Победитель": w["manager_name"],
-                        "Команда": w["team_name"],
-                        "Лига": w["league_tier"],
-                        "Туры": f"GW{h['start_gw']}–GW{h['end_gw']}",
+                        "Туры": f"GW{h['start_gw']}–{h['end_gw']}",
                         "Банк": f"{h['bank']:,} ₸".replace(",", " "),
                     }
                 )
             hist_df = pd.DataFrame(hist_rows).set_index("Цикл")
             st.dataframe(hist_df, use_container_width=True)
 
-        # --- Таблица участников текущего тура ---
-        st.subheader(f"Участники тура GW{gw} (цикл №{last_round['cycle_num']})")
+        st.subheader(f"Участники GW{gw} (цикл №{last_round['cycle_num']})")
         col = gw_col(gw)
         table = df.copy()
         table["gw_pts"] = table[col] if col in table.columns else 0
@@ -717,11 +921,14 @@ with tab_squid:
             return "DEAD (ранее)"
 
         table["Статус"] = [squid_status(i) for i in table.index]
+        squid_cols = (
+            ["team_name", "gw_pts", "Статус"]
+            if compact
+            else ["team_name", "manager_name", "league_tier", "gw_pts", "Статус"]
+        )
         table = (
             table.sort_values("gw_pts", ascending=False)
-            .reset_index(drop=True)[
-                ["team_name", "manager_name", "league_tier", "gw_pts", "Статус"]
-            ]
+            .reset_index(drop=True)[squid_cols]
             .rename(
                 columns={
                     "team_name": "Команда",
@@ -750,73 +957,141 @@ with tab_fame:
 
     st.header("🏅 Зал Славы — рекорды сезона")
 
-    f1, f2, f3 = st.columns(3)
-    f1.metric(
-        "🔥 Рекорд одного тура",
-        f"{record['points']} очков",
-        f"GW{record['gw']} — {record['manager']}",
-        delta_color="off",
-    )
-    f2.metric(
-        "👑 Чемпион сезона (Total)",
-        f"{champion['points']} очков",
-        f"{champion['manager']} ({champion['league']})",
-        delta_color="off",
-    )
-    best_avg = leaders.iloc[0]
-    f3.metric(
-        "📈 Лучший средний балл",
-        f"{best_avg['Средний балл']}",
-        f"{best_avg['Менеджер']} ({best_avg['Лига']})",
-        delta_color="off",
-    )
-
-    st.caption(
-        f"Рекорд тура: {record['team']} ({record['manager']}, "
-        f"{record['league']}) — {record['points']} очков в GW{record['gw']}. "
-        f"Чемпион: {champion['team']}."
+    metric_grid(
+        [
+            (
+                "🔥 Рекорд одного тура",
+                f"{record['points']} очков",
+                f"GW{record['gw']} — {record['manager']}",
+            ),
+            (
+                "👑 Чемпион сезона (Total)",
+                f"{champion['points']} очков",
+                f"{champion['manager']} ({champion['league']})",
+            ),
+            (
+                "📈 Лучший средний балл",
+                f"{leaders.iloc[0]['Средний балл']}",
+                f"{leaders.iloc[0]['Менеджер']} ({leaders.iloc[0]['Лига']})",
+            ),
+        ],
+        min(METRICS_PER_ROW, 3),
     )
 
-    st.subheader("Таблица лидеров (по среднему баллу за тур)")
-    st.dataframe(leaders.head(15), use_container_width=True)
+    st.subheader("Таблица лидеров (по среднему баллу)")
+    leaders_cols = (
+        ["Менеджер", "Total", "Средний балл"]
+        if compact
+        else ["Менеджер", "Команда", "Лига", "Total", "Средний балл",
+              "Лучший тур", "Разброс (σ)"]
+    )
+    st.dataframe(leaders[leaders_cols].head(15), use_container_width=True)
 
 with tab_wallet:
     st.header("💰 Финансовый Хаб")
 
+    with st.expander(
+        f"Призовой фонд сезона: {PRIZE_FUND_TOTAL:,} ₸".replace(",", " ")
+    ):
+        summary = prize_fund_summary()
+        fund_sum = int(summary["Сумма, ₸"].sum())
+        show = summary.copy()
+        show["Сумма, ₸"] = show["Сумма, ₸"].map(
+            lambda v: f"{v:,} ₸".replace(",", " ")
+        )
+        st.dataframe(show.set_index("Категория"), use_container_width=True)
+        if fund_sum == PRIZE_FUND_TOTAL:
+            st.caption(
+                f"Итого: {fund_sum:,} ₸ — сходится с фондом.".replace(",", " ")
+            )
+        else:
+            st.error(
+                f"Сумма категорий {fund_sum:,} ₸ не равна фонду "
+                f"{PRIZE_FUND_TOTAL:,} ₸ — проверь константы!".replace(",", " ")
+            )
+
+    payouts = calculate_prizes(df, current_gw)
+
+    # --- Персональная карточка выбранного менеджера ---
     row = df[df["manager_name"].astype(str) == selected_manager]
-    if row.empty:
-        st.info("Выбери менеджера в боковой панели.")
-    else:
+    if not row.empty:
         m = row.iloc[0]
         m_idx = row.index[0]
-
-        # Призовые Squid Game: сумма банков выигранных циклов
-        squid_history, _ = calculate_squid_game(df, current_gw)
-        won_cycles = [h for h in squid_history if h["winner_idx"] == m_idx]
-        prize_balance = sum(h["bank"] for h in won_cycles)
-
-        # Статус взноса из админ-таблицы (по FPL Team ID)
+        manager_payouts = payouts.get(m_idx, [])
+        prize_balance = sum(amount for _, amount in manager_payouts)
         payment_status = payment_map.get(int(m["team_id"]), "н/д")
 
         st.subheader(f"{m['team_name']}")
-        w1, w2, w3, w4 = st.columns(4)
-        w1.metric("Лига", m["league_tier"])
-        w2.metric("Очки за сезон 2025", int(m["total_pts"]))
-        w3.metric(
-            "Виртуальный баланс призовых",
-            f"{prize_balance:,} ₸".replace(",", " "),
+        metric_grid(
+            [
+                ("Лига", m["league_tier"], None),
+                ("Очки за сезон", str(int(m["total_pts"])), None),
+                (
+                    "Баланс призовых",
+                    f"{prize_balance:,} ₸".replace(",", " "),
+                    None,
+                ),
+                ("Статус взноса", payment_status, None),
+            ],
+            METRICS_PER_ROW,
         )
-        w4.metric("Статус взноса", payment_status)
 
-        if won_cycles:
-            st.markdown("**Выигранные циклы Squid Game:**")
-            for h in won_cycles:
-                bank_str = f"{h['bank']:,} ₸".replace(",", " ")
-                st.markdown(
-                    f"- Цикл №{h['cycle']} (GW{h['start_gw']}–GW{h['end_gw']}) "
-                    f"— {bank_str}"
-                )
+        if manager_payouts:
+            st.markdown("**Начисления по категориям:**")
+            payout_df = pd.DataFrame(
+                manager_payouts, columns=["Категория", "Сумма"]
+            )
+            payout_df["Сумма"] = payout_df["Сумма"].map(
+                lambda v: f"{v:,} ₸".replace(",", " ")
+            )
+            payout_df.index = payout_df.index + 1
+            st.dataframe(payout_df, use_container_width=True)
         else:
             st.caption(
-                f"Выигранных циклов Squid Game к GW{current_gw} пока нет."
+                f"К GW{current_gw} начислений нет. Двигай слайдер тура — "
+                "призовые пересчитываются на выбранный тур."
             )
+
+    # --- Общая таблица призовых по всем менеджерам ---
+    st.subheader("Призовые всех менеджеров")
+    st.caption(
+        "Сортировка по сумме; нажми на заголовок колонки, чтобы "
+        "пересортировать."
+    )
+    board_rows = []
+    for idx, plist in payouts.items():
+        board_rows.append(
+            {
+                "Менеджер": df.loc[idx, "manager_name"],
+                "Команда": df.loc[idx, "team_name"],
+                "Лига": df.loc[idx, "league_tier"],
+                "Категорий": len(plist),
+                "Итого, ₸": sum(a for _, a in plist),
+            }
+        )
+    board = (
+        pd.DataFrame(board_rows)
+        .sort_values(["Итого, ₸", "Менеджер"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
+    board.index = board.index + 1
+    board_cols = (
+        ["Менеджер", "Категорий", "Итого, ₸"]
+        if compact
+        else ["Менеджер", "Команда", "Лига", "Категорий", "Итого, ₸"]
+    )
+    st.dataframe(board[board_cols], use_container_width=True)
+    paid_total = int(board["Итого, ₸"].sum())
+    st.caption(
+        f"Начислено к GW{current_gw}: {paid_total:,} ₸ из "
+        f"{PRIZE_FUND_TOTAL:,} ₸.".replace(",", " ")
+    )
+
+    st.caption(
+        "Номинации, ожидающие данных: "
+        + "; ".join(
+            f"{name} ({amount:,} ₸ — {reason})".replace(",", " ")
+            for name, amount, reason in PRIZE_PENDING
+        )
+        + "."
+    )
