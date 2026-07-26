@@ -62,6 +62,11 @@ ADMIN_REQUIRED_COLS = [
     "Payment_Status",
 ]
 
+# Необязательная колонка: ID H2H-лиги в FPL (одинаковый для всех команд лиги).
+# Если она заполнена, таблицы строятся по реальным матчам из API,
+# иначе — по сгенерированному круговому календарю.
+ADMIN_LEAGUE_ID_COL = "League_ID"
+
 # Параметры еврокубков
 CL_QUALIFY_TOP_N = 10      # топ-N из каждой лиги проходит в Лигу Чемпионов
 QUALIFICATION_END_GW = 20  # квалификация длится до этого тура включительно
@@ -190,7 +195,10 @@ def load_mock_data(path: str) -> pd.DataFrame:
 @st.cache_data(ttl=60)
 def load_admin_sheet(url: str):
     """Читает опубликованный CSV и возвращает
-    (team_ids, team_tier_map, payment_map)."""
+    (team_ids, team_tier_map, payment_map, league_id_map).
+
+    league_id_map: {League_Tier: League_ID} — ID H2H-лиги в FPL.
+    """
     admin_df = pd.read_csv(url)
 
     missing = [c for c in ADMIN_REQUIRED_COLS if c not in admin_df.columns]
@@ -204,14 +212,10 @@ def load_admin_sheet(url: str):
     )
     admin_df = admin_df.dropna(subset=["FPL_Team_ID"]).copy()
     admin_df["FPL_Team_ID"] = admin_df["FPL_Team_ID"].astype(int)
+    admin_df["League_Tier"] = admin_df["League_Tier"].astype(str).str.strip()
 
     team_ids = admin_df["FPL_Team_ID"].tolist()
-    team_tier_map = dict(
-        zip(
-            admin_df["FPL_Team_ID"],
-            admin_df["League_Tier"].astype(str).str.strip(),
-        )
-    )
+    team_tier_map = dict(zip(admin_df["FPL_Team_ID"], admin_df["League_Tier"]))
     payment_map = dict(
         zip(
             admin_df["FPL_Team_ID"],
@@ -219,7 +223,18 @@ def load_admin_sheet(url: str):
         )
     )
 
-    return team_ids, team_tier_map, payment_map
+    # League_ID: один на дивизион, берём первое непустое значение по каждой лиге
+    league_id_map = {}
+    if ADMIN_LEAGUE_ID_COL in admin_df.columns:
+        ids = pd.to_numeric(
+            admin_df[ADMIN_LEAGUE_ID_COL], errors="coerce"
+        )
+        for tier, group in ids.groupby(admin_df["League_Tier"]):
+            valid = group.dropna()
+            if not valid.empty:
+                league_id_map[tier] = int(valid.iloc[0])
+
+    return team_ids, team_tier_map, payment_map, league_id_map
 
 
 # ---------- Загрузка из FPL API ----------
@@ -494,6 +509,133 @@ def calculate_squid_game(df: pd.DataFrame, current_gw: int):
     return history, last_round
 
 
+# ---------- Модуль H2H-таблиц лиг ----------
+
+@st.cache_data(ttl=600)
+def fetch_h2h_matches(league_id: int) -> pd.DataFrame:
+    """Реальные матчи H2H-лиги из FPL API (постранично).
+
+    Возвращает DataFrame с колонками event, entry_1, pts_1, entry_2, pts_2.
+    Пустой DataFrame — если матчей нет (сезон не начался) или лига закрыта.
+    """
+    rows = []
+    page = 1
+    while page <= 50:  # предохранитель от бесконечного цикла
+        resp = requests.get(
+            f"{FPL_BASE_URL}/leagues-h2h-matches/league/{league_id}/",
+            params={"page": page},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        for m in data.get("results", []):
+            # Пропускаем "выходные" и матчи против среднего по лиге
+            if m.get("is_bye"):
+                continue
+            if m.get("entry_1_entry") is None or m.get("entry_2_entry") is None:
+                continue
+            rows.append(
+                {
+                    "event": m.get("event"),
+                    "entry_1": int(m["entry_1_entry"]),
+                    "pts_1": m.get("entry_1_points", 0),
+                    "entry_2": int(m["entry_2_entry"]),
+                    "pts_2": m.get("entry_2_points", 0),
+                }
+            )
+        if not data.get("has_next"):
+            break
+        page += 1
+
+    return pd.DataFrame(
+        rows, columns=["event", "entry_1", "pts_1", "entry_2", "pts_2"]
+    )
+
+
+def build_h2h_schedule(team_ids: list, n_gws: int = 38) -> dict:
+    """Круговой календарь H2H (метод «карусели») — запасной вариант,
+    когда реальные матчи из API недоступны.
+
+    Для 20 команд получается 19 туров полного круга, GW1–19 — первый круг,
+    GW20–38 — второй. Календарь детерминирован: при одном и том же составе
+    лиги расписание всегда одинаковое.
+    """
+    ids = sorted(team_ids)
+    if len(ids) < 2:
+        return {gw: [] for gw in range(1, n_gws + 1)}
+    if len(ids) % 2:
+        ids.append(None)  # нечётное число команд — фиктивный соперник (выходной)
+
+    n = len(ids)
+    rounds = []
+    arr = ids[:]
+    for _ in range(n - 1):
+        pairs = [(arr[i], arr[n - 1 - i]) for i in range(n // 2)]
+        rounds.append([(a, b) for a, b in pairs if a is not None and b is not None])
+        arr = [arr[0]] + [arr[-1]] + arr[1:-1]  # фиксируем первого, крутим остальных
+
+    return {gw: rounds[(gw - 1) % len(rounds)] for gw in range(1, n_gws + 1)}
+
+
+def calculate_h2h_table(
+    league_df: pd.DataFrame,
+    current_gw: int,
+    matches: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """H2H-таблица дивизиона: 3 очка за победу, 1 за ничью, 0 за поражение.
+
+    Если передан matches (реальные матчи из API) — считает по ним,
+    иначе строит круговой календарь и берёт очки туров из league_df.
+    """
+    if league_df.empty:
+        return league_df.assign(h2h_pts=[], wins=[], draws=[], losses=[])
+
+    idx_by_team = {int(t): i for i, t in league_df["team_id"].items()}
+    stats = {i: {"h2h_pts": 0, "wins": 0, "draws": 0, "losses": 0}
+             for i in league_df.index}
+
+    def score(ia, ib, pa, pb):
+        if pa > pb:
+            stats[ia]["h2h_pts"] += 3
+            stats[ia]["wins"] += 1
+            stats[ib]["losses"] += 1
+        elif pb > pa:
+            stats[ib]["h2h_pts"] += 3
+            stats[ib]["wins"] += 1
+            stats[ia]["losses"] += 1
+        else:
+            stats[ia]["h2h_pts"] += 1
+            stats[ib]["h2h_pts"] += 1
+            stats[ia]["draws"] += 1
+            stats[ib]["draws"] += 1
+
+    if matches is not None and not matches.empty:
+        # --- Реальные результаты из API ---
+        played = matches[matches["event"] <= current_gw]
+        for row in played.itertuples():
+            ia = idx_by_team.get(row.entry_1)
+            ib = idx_by_team.get(row.entry_2)
+            if ia is None or ib is None:
+                continue  # соперник не из нашего синдиката
+            score(ia, ib, row.pts_1, row.pts_2)
+    else:
+        # --- Запасной круговой календарь по очкам туров ---
+        schedule = build_h2h_schedule(list(idx_by_team.keys()), 38)
+        for gw in range(1, current_gw + 1):
+            col = gw_col(gw)
+            if col not in league_df.columns:
+                continue
+            pts = league_df[col]
+            for team_a, team_b in schedule.get(gw, []):
+                ia, ib = idx_by_team[team_a], idx_by_team[team_b]
+                score(ia, ib, pts.loc[ia], pts.loc[ib])
+
+    result = league_df.copy()
+    for field in ("h2h_pts", "wins", "draws", "losses"):
+        result[field] = [stats[i][field] for i in result.index]
+    return result
+
+
 # ---------- Модуль «Зал Славы» ----------
 
 def calculate_hall_of_fame(df: pd.DataFrame):
@@ -556,14 +698,22 @@ def calculate_prizes(df: pd.DataFrame, current_gw: int) -> dict:
 
     totals = sum_gw_range(df, 1, current_gw)
 
-    # 1. Призовые мест в лигах H2H (по итоговому тоталу внутри лиги)
+    # 1. Призовые мест в лигах H2H (по H2H-таблице: очки 3/1/0, затем Total)
     for league in ALL_LEAGUES:
-        league_idx = df[df["league_tier"] == league].index
-        ranked = totals.loc[league_idx].sort_values(ascending=False)
+        league_df = df[df["league_tier"] == league]
+        if league_df.empty:
+            continue
+        standings = calculate_h2h_table(
+            league_df, current_gw, h2h_matches_by_tier.get(league)
+        )
+        standings["_total"] = totals.loc[standings.index]
+        standings = standings.sort_values(
+            ["h2h_pts", "_total"], ascending=[False, False]
+        )
         for place, prize in PRIZE_LEAGUE.items():
-            if len(ranked) >= place:
+            if len(standings) >= place:
                 award(
-                    ranked.index[place - 1],
+                    standings.index[place - 1],
                     f"Лига {league} — {place} место",
                     prize,
                 )
@@ -679,12 +829,17 @@ if data_source == "Данные сезона 2025 (Excel)":
 
     # Статусы взносов подтягиваем из админ-таблицы; её недоступность не критична
     try:
-        _, _, payment_map = load_admin_sheet(CSV_URL)
+        _, _, payment_map, _ = load_admin_sheet(CSV_URL)
     except Exception:
         payment_map = {}
+    # Реальные H2H-матчи относятся к текущему сезону, а в Excel — прошлый,
+    # поэтому здесь всегда используем сгенерированный календарь.
+    h2h_matches_by_tier = {}
 else:
     try:
-        team_ids, team_tier_map, payment_map = load_admin_sheet(CSV_URL)
+        team_ids, team_tier_map, payment_map, league_id_map = (
+            load_admin_sheet(CSV_URL)
+        )
     except Exception as e:
         st.error(
             "Не удалось загрузить админ-таблицу Google Sheets. "
@@ -702,6 +857,31 @@ else:
     with st.spinner("Загружаю данные из FPL API..."):
         df = fetch_fpl_data(team_ids, team_tier_map)
 
+    # Реальные H2H-матчи по League_ID из админ-таблицы
+    h2h_matches_by_tier = {}
+    if league_id_map:
+        h2h_errors = []
+        with st.spinner("Загружаю матчи H2H-лиг..."):
+            for tier, league_id in league_id_map.items():
+                try:
+                    m = fetch_h2h_matches(league_id)
+                    if not m.empty:
+                        h2h_matches_by_tier[tier] = m
+                except requests.exceptions.RequestException as e:
+                    h2h_errors.append(f"{tier} (ID {league_id}): {e}")
+        if h2h_errors:
+            st.warning(
+                "Не удалось загрузить матчи лиг:\n\n- "
+                + "\n- ".join(h2h_errors)
+                + "\n\nДля них используется сгенерированный календарь."
+            )
+    else:
+        st.info(
+            f"Колонка {ADMIN_LEAGUE_ID_COL} в админ-таблице пуста — "
+            "таблицы строятся по сгенерированному круговому календарю. "
+            "Заполни её, чтобы использовать реальные матчи FPL."
+        )
+
 if df.empty:
     st.stop()
 
@@ -717,26 +897,48 @@ current_gw = st.sidebar.slider(
 
 # ---------- Расчёт общих очков ----------
 
-df["total_pts"] = sum_gw_range(df, 1, 38)
+# Total считается по сыгранным турам — до выбранного слайдером тура
+df["total_pts"] = sum_gw_range(df, 1, current_gw)
 
 # Для таблиц лиг показываем максимум 5 последних туров, чтобы не раздувать вывод
 gw_cols_all = get_gw_cols(df)
 gw_cols_display = gw_cols_all[-5:]
+
+H2H_COL_LABELS = {
+    "team_name": "Команда",
+    "manager_name": "Менеджер",
+    "h2h_pts": "Очки H2H",
+    "wins": "В",
+    "draws": "Н",
+    "losses": "П",
+    "total_pts": "Total",
+    "team_value": "Стоимость",
+}
+
 DISPLAY_COLS = (
-    ["team_name", "manager_name"]
+    ["team_name", "manager_name", "h2h_pts", "wins", "draws", "losses"]
     + gw_cols_display
     + ["total_pts", "team_value"]
 )
 
 
 def league_table(data: pd.DataFrame, tier: str) -> pd.DataFrame:
+    """H2H-таблица дивизиона: сортировка по очкам 3/1/0, затем по Total."""
+    league_df = data[data["league_tier"] == tier]
+    if league_df.empty:
+        return pd.DataFrame()
+
+    table = calculate_h2h_table(
+        league_df, current_gw, h2h_matches_by_tier.get(tier)
+    )
     table = (
-        data[data["league_tier"] == tier]
-        .sort_values("total_pts", ascending=False)
+        table.sort_values(
+            ["h2h_pts", "total_pts"], ascending=[False, False]
+        )
         .reset_index(drop=True)
     )
     table.index = table.index + 1  # место в таблице с 1
-    return table[DISPLAY_COLS]
+    return table[DISPLAY_COLS].rename(columns=H2H_COL_LABELS)
 
 
 # Селектор менеджера для Финансового Хаба (поиск набором текста)
@@ -755,11 +957,11 @@ compact = st.sidebar.toggle(
 
 # Наборы колонок таблиц лиг: полный для десктопа, ужатый для телефона
 if compact:
-    last_gw_cols = gw_cols_display[-1:]  # только последний тур
-    DISPLAY_COLS = ["team_name"] + last_gw_cols + ["total_pts"]
+    DISPLAY_COLS = ["team_name", "h2h_pts", "wins", "draws", "losses",
+                    "total_pts"]
 else:
     DISPLAY_COLS = (
-        ["team_name", "manager_name"]
+        ["team_name", "manager_name", "h2h_pts", "wins", "draws", "losses"]
         + gw_cols_display
         + ["total_pts", "team_value"]
     )
@@ -786,6 +988,21 @@ tab_leagues, tab_cups, tab_squid, tab_fame, tab_wallet = st.tabs(
 )
 
 with tab_leagues:
+    if h2h_matches_by_tier:
+        calendar_note = (
+            f"Реальные матчи FPL по {ADMIN_LEAGUE_ID_COL} из админ-таблицы "
+            f"({len(h2h_matches_by_tier)} из {len(ALL_LEAGUES)} лиг)."
+        )
+    else:
+        calendar_note = (
+            "Календарь сгенерирован (круговой, каждый с каждым в два круга) — "
+            "реальные матчи FPL не загружены."
+        )
+    st.caption(
+        f"Таблицы H2H по состоянию на GW{current_gw}: 3 очка за победу в "
+        "матче тура, 1 за ничью, 0 за поражение. При равенстве очков выше "
+        f"команда с большим Total. {calendar_note}"
+    )
     for league_name in ALL_LEAGUES:
         league_df = league_table(df, league_name)
         if not league_df.empty:
