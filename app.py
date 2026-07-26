@@ -366,10 +366,12 @@ def load_mock_data(path: str) -> pd.DataFrame:
 @st.cache_data(ttl=60)
 def load_admin_sheet(url: str):
     """Читает опубликованный CSV и возвращает
-    (team_ids, team_tier_map, payment_map, league_id_map, pin_map).
+    (team_ids, team_tier_map, payment_map, league_id_map, pin_map,
+     manager_team_map).
 
     league_id_map: {League_Tier: League_ID} — ID H2H-лиги в FPL.
     pin_map: {Manager_Name: последние 4 цифры телефона} — для верификации.
+    manager_team_map: {Manager_Name: FPL_Team_ID}.
     """
     admin_df = pd.read_csv(url)
 
@@ -408,15 +410,21 @@ def load_admin_sheet(url: str):
 
     # PIN = последние 4 цифры телефона. Сам номер наружу не отдаём.
     pin_map = {}
-    for manager, phone in zip(
+    manager_team_map = {}
+    for manager, phone, tid in zip(
         admin_df["Manager_Name"].astype(str).str.strip(),
         admin_df["Phone_Number"].astype(str),
+        admin_df["FPL_Team_ID"],
     ):
+        if not manager:
+            continue
         digits = re.sub(r"\D", "", phone)
-        if len(digits) >= 4 and manager:
+        if len(digits) >= 4:
             pin_map[manager] = digits[-4:]
+        manager_team_map[manager] = int(tid)
 
-    return team_ids, team_tier_map, payment_map, league_id_map, pin_map
+    return (team_ids, team_tier_map, payment_map, league_id_map,
+            pin_map, manager_team_map)
 
 
 # ---------- Загрузка из FPL API ----------
@@ -1013,6 +1021,9 @@ def prize_fund_summary() -> pd.DataFrame:
 
 POST_CATEGORIES = ["😂 Мем", "📊 Аналитика/Состав", "📢 Объявление", "💬 Чат"]
 POSTS_TABLE = "posts"
+# Имена колонок в таблице posts (совпадают с существующей схемой Supabase)
+COL_TEXT = "content"       # текст поста
+COL_LIKES = "likes_count"  # счётчик лайков
 MAX_IMAGE_BYTES = 300_000  # ~300 КБ: картинка кодируется в base64 и лежит в строке
 
 
@@ -1040,6 +1051,22 @@ def _sb_headers(key: str, extra: dict | None = None) -> dict:
     return headers
 
 
+def _sb_error(resp) -> str:
+    """Достаёт понятный текст ошибки из ответа PostgREST."""
+    try:
+        data = resp.json()
+    except ValueError:
+        return f"{resp.status_code}: {resp.text[:300]}"
+    parts = [
+        data.get("message"),
+        data.get("details"),
+        data.get("hint"),
+        data.get("code"),
+    ]
+    text = " | ".join(str(p) for p in parts if p)
+    return text or f"{resp.status_code}: {resp.text[:300]}"
+
+
 def fetch_posts() -> list[dict]:
     """Все посты: из Supabase или из session_state в демо-режиме."""
     url, key = supabase_config()
@@ -1052,7 +1079,9 @@ def fetch_posts() -> list[dict]:
             params={"select": "*", "order": "created_at.desc", "limit": "300"},
             timeout=10,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            st.warning(f"Не удалось загрузить ленту: {_sb_error(resp)}")
+            return list(st.session_state.get("demo_posts", []))
         return resp.json()
     except (requests.exceptions.RequestException, ValueError) as e:
         st.warning(f"Не удалось загрузить ленту из Supabase: {e}")
@@ -1065,14 +1094,23 @@ def insert_post(post: dict) -> bool:
     if not url:
         st.session_state.setdefault("demo_posts", []).insert(0, post)
         return True
+
+    # id генерирует база (uuid default или identity) — свой не навязываем,
+    # иначе тип может не совпасть с колонкой существующей таблицы.
+    payload = {k: v for k, v in post.items() if k != "id"}
     try:
         resp = requests.post(
             f"{url}/rest/v1/{POSTS_TABLE}",
             headers=_sb_headers(key, {"Prefer": "return=minimal"}),
-            json=post,
+            json=payload,
             timeout=10,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            st.error(f"Не удалось опубликовать пост: {_sb_error(resp)}")
+            with st.expander("Отладка: что отправлялось"):
+                st.json({"columns": list(payload.keys()),
+                         "status": resp.status_code})
+            return False
         return True
     except requests.exceptions.RequestException as e:
         st.error(f"Не удалось опубликовать пост: {e}")
@@ -1085,17 +1123,19 @@ def like_post(post_id: str, current_likes: int) -> bool:
     if not url:
         for p in st.session_state.get("demo_posts", []):
             if str(p.get("id")) == str(post_id):
-                p["likes"] = int(p.get("likes", 0)) + 1
+                p[COL_LIKES] = int(p.get(COL_LIKES, 0)) + 1
         return True
     try:
         resp = requests.patch(
             f"{url}/rest/v1/{POSTS_TABLE}",
             headers=_sb_headers(key, {"Prefer": "return=minimal"}),
             params={"id": f"eq.{post_id}"},
-            json={"likes": int(current_likes) + 1},
+            json={COL_LIKES: int(current_likes) + 1},
             timeout=10,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            st.error(f"Не удалось поставить лайк: {_sb_error(resp)}")
+            return False
         return True
     except requests.exceptions.RequestException as e:
         st.error(f"Не удалось поставить лайк: {e}")
@@ -1134,7 +1174,7 @@ def render_post_image(image_ref: str):
 def sort_posts(posts: list[dict], mode: str, gw: int) -> list[dict]:
     """Фильтрация и сортировка ленты."""
     def likes(p):
-        return int(p.get("likes") or 0)
+        return int(p.get(COL_LIKES) or 0)
 
     def created(p):
         return str(p.get("created_at") or "")
@@ -1185,17 +1225,20 @@ if data_source == "Данные сезона 2025 (Excel)":
 
     # Статусы взносов подтягиваем из админ-таблицы; её недоступность не критична
     try:
-        _, _, payment_map, _, pin_map = load_admin_sheet(CSV_URL)
+        _, _, payment_map, _, pin_map, manager_team_map = load_admin_sheet(
+            CSV_URL
+        )
     except Exception:
-        payment_map, pin_map = {}, {}
+        payment_map, pin_map, manager_team_map = {}, {}, {}
     # Реальные H2H-матчи относятся к текущему сезону, а в Excel — прошлый,
     # поэтому здесь всегда используем сгенерированный календарь.
     h2h_matches_by_tier = {}
 else:
     try:
-        team_ids, team_tier_map, payment_map, league_id_map, pin_map = (
-            load_admin_sheet(CSV_URL)
-        )
+        (
+            team_ids, team_tier_map, payment_map, league_id_map, pin_map,
+            manager_team_map,
+        ) = load_admin_sheet(CSV_URL)
     except Exception as e:
         st.error(
             "Не удалось загрузить админ-таблицу Google Sheets. "
@@ -1842,14 +1885,17 @@ with tab_social:
                     st.error("Пост пустой — добавь текст или картинку.")
                 elif img_error is None:
                     post = {
-                        "id": str(uuid.uuid4()),
+                        "id": str(uuid.uuid4()),  # для демо-режима; в БД свой
                         "created_at": datetime.now(timezone.utc).isoformat(),
                         "manager_name": author,
+                        "fpl_team_id": int(
+                            manager_team_map.get(author, 0)
+                        ),
                         "category": category,
-                        "body": body.strip(),
+                        COL_TEXT: body.strip(),
                         "image_url": image_ref,
                         "gw": int(current_gw),
-                        "likes": 0,
+                        COL_LIKES: 0,
                         "verified": True,
                     }
                     if insert_post(post):
@@ -1878,7 +1924,7 @@ with tab_social:
     for post in posts:
         post_id = str(post.get("id", ""))
         author = str(post.get("manager_name", "—"))
-        likes = int(post.get("likes") or 0)
+        likes = int(post.get(COL_LIKES) or 0)
         created_raw = str(post.get("created_at") or "")
         stamp = created_raw[:16].replace("T", " ")
         post_gw = post.get("gw")
@@ -1908,9 +1954,10 @@ with tab_social:
                 unsafe_allow_html=True,
             )
 
-            if post.get("body"):
+            text = post.get(COL_TEXT) or post.get("body")
+            if text:
                 st.markdown(
-                    f'<div class="fpl-post-body">{post["body"]}</div>',
+                    f'<div class="fpl-post-body">{text}</div>',
                     unsafe_allow_html=True,
                 )
 
