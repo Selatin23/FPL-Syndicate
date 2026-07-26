@@ -118,7 +118,26 @@ with logo_col:
         st.markdown("<div style='font-size:3.4rem'>🏆</div>",
                     unsafe_allow_html=True)
 with banner_col:
-    st.markdown(
+    # Заполняется ниже — статус-чип зависит от текущего тура
+    banner_slot = st.empty()
+
+
+def season_status_chip(current_event, fallback_gw) -> str:
+    """Динамический статус сезона.
+
+    current_event — номер тура из FPL API (None, если API недоступен);
+    fallback_gw — тур, выбранный слайдером (офлайн-режим).
+    """
+    gw = current_event if current_event is not None else fallback_gw
+    if gw is None or gw <= 0:
+        return "🟡 Межсезонье (до GW1)"
+    if gw > 38:
+        return "🏁 Сезон завершён"
+    return f"🟢 LIVE (GW{gw})"
+
+
+def render_banner(status_chip: str):
+    banner_slot.markdown(
         f"""
         <div class="fpl-banner">
             <h1>⚽ FPL Syndicate {SEASON_LABEL}</h1>
@@ -126,7 +145,7 @@ with banner_col:
             Еврокубки, цикличная «Игра в Кальмара» и прозрачный Финансовый Хаб
             с призовым фондом 1 600 000 ₸.</p>
             <div class="fpl-chips">
-                <span class="fpl-chip">Статус: 🟢 В эфире</span>
+                <span class="fpl-chip">Статус: {status_chip}</span>
                 <span class="fpl-chip">Сезон: {SEASON_LABEL}</span>
                 <span class="fpl-chip">Призовой фонд: 1 600 000 ₸</span>
             </div>
@@ -134,6 +153,7 @@ with banner_col:
         """,
         unsafe_allow_html=True,
     )
+
 
 EXCEL_FILE = "Teams_2025.xlsx"
 
@@ -345,6 +365,35 @@ def load_admin_sheet(url: str):
 
 
 # ---------- Загрузка из FPL API ----------
+
+@st.cache_data(ttl=300)
+def fetch_current_event():
+    """Номер текущего тура из FPL API (bootstrap-static).
+
+    Возвращает 0 до старта сезона, 1–38 во время, 39 после завершения,
+    либо None, если API недоступен.
+    """
+    try:
+        resp = requests.get(f"{FPL_BASE_URL}/bootstrap-static/", timeout=10)
+        resp.raise_for_status()
+        events = resp.json().get("events", [])
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        return None
+
+    if not events:
+        return None
+
+    current = next((e["id"] for e in events if e.get("is_current")), None)
+    if current is not None:
+        return int(current)
+
+    finished = [e["id"] for e in events if e.get("finished")]
+    if len(finished) >= len(events):
+        return len(events) + 1  # все туры сыграны — сезон завершён
+    if finished:
+        return int(max(finished))
+    return 0  # ни один тур не начался — межсезонье
+
 
 @st.cache_data(ttl=600)  # кэш 10 минут, чтобы не дёргать API на каждый rerun
 def fetch_fpl_data(team_ids: list[int], team_tier_map: dict) -> pd.DataFrame:
@@ -1008,6 +1057,11 @@ current_gw = st.sidebar.slider(
     max_value=38,
     value=min(max(auto_gw, 1), 38),
 )
+
+# Статус сезона: из API в онлайн-режиме, иначе по выбранному туру
+api_mode = data_source != "Данные сезона 2025 (Excel)"
+current_event = fetch_current_event() if api_mode else None
+render_banner(season_status_chip(current_event, current_gw))
 
 # ---------- Расчёт общих очков ----------
 
