@@ -1,32 +1,139 @@
+import os
 import re
 
 import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="FPL Syndicate", layout="wide")
+APP_VERSION = "v2.6"
+SEASON_LABEL = "2026"
+LOGO_FILE = "0BEA079A-1955-476D-AF71-DFBAE647ED7E.png"
 
-st.title("FPL Syndicate")
+st.set_page_config(
+    page_title="FPL Syndicate 2026 | Платформа Лиги",
+    page_icon="🏆",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# Адаптация под мобильные: убираем лишние поля, ужимаем метрики и таблицы
+# ---------- Кастомный стиль ----------
+
 st.markdown(
     """
     <style>
+    /* Компактные отступы — для телефонов */
     .block-container {
-        padding-top: 2.8rem;
-        padding-left: 0.8rem;
-        padding-right: 0.8rem;
+        padding-top: 2.2rem;
+        padding-left: 0.9rem;
+        padding-right: 0.9rem;
+        padding-bottom: 4.5rem;
+    }
+    [data-testid="stHeader"] { height: 2.5rem; }
+
+    /* Объёмные карточки метрик */
+    div[data-testid="stMetric"] {
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(128, 128, 128, 0.22);
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        padding: 0.75rem 0.9rem;
     }
     [data-testid="stMetricValue"] { font-size: 1.35rem; }
-    [data-testid="stMetricLabel"] { font-size: 0.8rem; }
+    [data-testid="stMetricLabel"] { font-size: 0.8rem; opacity: 0.85; }
     [data-testid="stMetricDelta"] { font-size: 0.75rem; }
-    [data-testid="stHeader"] { height: 2.5rem; }
+
+    /* Вкладки: контрастный акцент на активной */
+    div[data-testid="stTabs"] button[data-baseweb="tab"] {
+        padding: 0.45rem 0.75rem;
+        font-size: 0.9rem;
+        border-radius: 10px 10px 0 0;
+    }
+    div[data-testid="stTabs"] button[aria-selected="true"] {
+        background: rgba(0, 223, 122, 0.14);
+        border-bottom: 3px solid #00DF7A;
+        font-weight: 700;
+    }
+
     div[data-testid="stDataFrame"] { font-size: 0.85rem; }
-    button[data-baseweb="tab"] { padding: 0.4rem 0.6rem; font-size: 0.9rem; }
+
+    /* Баннер */
+    .fpl-banner {
+        border: 1px solid rgba(128, 128, 128, 0.22);
+        border-radius: 14px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        padding: 0.9rem 1.1rem;
+        margin-bottom: 0.6rem;
+    }
+    .fpl-banner h1 { margin: 0 0 0.35rem 0; font-size: 1.6rem; }
+    .fpl-banner p { margin: 0; font-size: 0.92rem; opacity: 0.88; }
+    .fpl-chips { margin-top: 0.7rem; }
+    .fpl-chip {
+        display: inline-block;
+        padding: 0.22rem 0.65rem;
+        margin: 0.15rem 0.35rem 0.15rem 0;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        background: rgba(0, 223, 122, 0.14);
+        border: 1px solid rgba(0, 223, 122, 0.45);
+    }
+
+    /* HTML-таблицы лиг с кликабельными командами */
+    .fpl-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    .fpl-table th, .fpl-table td {
+        padding: 0.4rem 0.5rem;
+        border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+        text-align: right;
+        white-space: nowrap;
+    }
+    .fpl-table th { text-align: right; font-size: 0.78rem; opacity: 0.8; }
+    .fpl-table td:nth-child(1), .fpl-table th:nth-child(1) { text-align: left; }
+    .fpl-table td:nth-child(2), .fpl-table th:nth-child(2) { text-align: left; }
+    .fpl-table tbody tr:hover { background: rgba(0, 223, 122, 0.07); }
+    .fpl-table a { text-decoration: none; font-weight: 600; }
+    .fpl-table a:hover { text-decoration: underline; }
+    .fpl-wrap { overflow-x: auto; }
+
+    /* Футер */
+    .fpl-footer {
+        margin-top: 2rem;
+        padding: 0.9rem 0 0.4rem 0;
+        border-top: 1px solid rgba(128, 128, 128, 0.25);
+        text-align: center;
+        font-size: 0.8rem;
+        opacity: 0.7;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+# ---------- Логотип и баннер ----------
+
+logo_col, banner_col = st.columns([1, 5])
+with logo_col:
+    if os.path.exists(LOGO_FILE):
+        st.image(LOGO_FILE, use_container_width=True)
+    else:
+        st.markdown("<div style='font-size:3.4rem'>🏆</div>",
+                    unsafe_allow_html=True)
+with banner_col:
+    st.markdown(
+        f"""
+        <div class="fpl-banner">
+            <h1>⚽ FPL Syndicate {SEASON_LABEL}</h1>
+            <p>Единый аналитический хаб 160 участников: Head-to-Head лиги,
+            Еврокубки, цикличная «Игра в Кальмара» и прозрачный Финансовый Хаб
+            с призовым фондом 1 600 000 ₸.</p>
+            <div class="fpl-chips">
+                <span class="fpl-chip">Статус: 🟢 В эфире</span>
+                <span class="fpl-chip">Сезон: {SEASON_LABEL}</span>
+                <span class="fpl-chip">Призовой фонд: 1 600 000 ₸</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 EXCEL_FILE = "Teams_2025.xlsx"
 
@@ -800,6 +907,13 @@ def prize_fund_summary() -> pd.DataFrame:
 
 # ---------- Выбор источника данных ----------
 
+if os.path.exists(LOGO_FILE):
+    st.sidebar.image(LOGO_FILE, use_container_width=True)
+st.sidebar.markdown(
+    f"**FPL Syndicate** · Платформа `{APP_VERSION}`  \nСезон {SEASON_LABEL}"
+)
+st.sidebar.divider()
+
 st.sidebar.header("Источник данных")
 data_source = st.sidebar.radio(
     "Откуда брать данные:",
@@ -915,6 +1029,8 @@ H2H_COL_LABELS = {
     "team_value": "Стоимость",
 }
 
+FPL_ENTRY_URL = "https://fantasy.premierleague.com/entry/{team_id}/event/1"
+
 DISPLAY_COLS = (
     ["team_name", "manager_name", "h2h_pts", "wins", "draws", "losses"]
     + gw_cols_display
@@ -938,7 +1054,67 @@ def league_table(data: pd.DataFrame, tier: str) -> pd.DataFrame:
         .reset_index(drop=True)
     )
     table.index = table.index + 1  # место в таблице с 1
-    return table[DISPLAY_COLS].rename(columns=H2H_COL_LABELS)
+    cols = ["team_id"] + [c for c in DISPLAY_COLS if c != "team_id"]
+    return table[cols].rename(columns=H2H_COL_LABELS)
+
+
+def render_league_html(table: pd.DataFrame):
+    """Таблица лиги с названием команды как ссылкой на профиль FPL."""
+    show = table.drop(columns=["team_id"])
+    header = "".join(f"<th>{c}</th>" for c in ["#"] + list(show.columns))
+
+    body = []
+    for place, (idx, row) in enumerate(show.iterrows(), start=1):
+        team_id = int(table.loc[idx, "team_id"])
+        url = FPL_ENTRY_URL.format(team_id=team_id)
+        cells = []
+        for col in show.columns:
+            value = row[col]
+            if col == "Команда":
+                cells.append(
+                    f'<td><a href="{url}" target="_blank" '
+                    f'rel="noopener">{value}</a></td>'
+                )
+            elif isinstance(value, float):
+                cells.append(
+                    "<td>—</td>" if pd.isna(value) else f"<td>{value:.1f}</td>"
+                )
+            else:
+                cells.append(f"<td>{value}</td>")
+        body.append(f"<tr><td>{place}</td>{''.join(cells)}</tr>")
+
+    st.markdown(
+        '<div class="fpl-wrap"><table class="fpl-table">'
+        f"<thead><tr>{header}</tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def division_rating(data: pd.DataFrame) -> pd.DataFrame:
+    """Рейтинг дивизионов по среднему TOTAL участников."""
+    rows = []
+    for league in ALL_LEAGUES:
+        subset = data[data["league_tier"] == league]
+        if subset.empty:
+            continue
+        rows.append(
+            {
+                "Дивизион": league,
+                "Команд": len(subset),
+                "Средний Total": round(subset["total_pts"].mean(), 1),
+                "Медиана": int(subset["total_pts"].median()),
+                "Лучший": int(subset["total_pts"].max()),
+                "Худший": int(subset["total_pts"].min()),
+            }
+        )
+    rating = (
+        pd.DataFrame(rows)
+        .sort_values("Средний Total", ascending=False)
+        .reset_index(drop=True)
+    )
+    rating.index = rating.index + 1
+    return rating
 
 
 # Селектор менеджера для Финансового Хаба (поиск набором текста)
@@ -1001,13 +1177,46 @@ with tab_leagues:
     st.caption(
         f"Таблицы H2H по состоянию на GW{current_gw}: 3 очка за победу в "
         "матче тура, 1 за ничью, 0 за поражение. При равенстве очков выше "
-        f"команда с большим Total. {calendar_note}"
+        f"команда с большим Total. {calendar_note} Название команды — ссылка "
+        "на профиль в FPL."
     )
-    for league_name in ALL_LEAGUES:
-        league_df = league_table(df, league_name)
-        if not league_df.empty:
-            st.header(league_name)
-            st.dataframe(league_df, use_container_width=True)
+
+    # --- Сводный рейтинг дивизионов ---
+    with st.expander("📊 Рейтинг дивизионов по среднему TOTAL", expanded=False):
+        rating = division_rating(df)
+        rating_cols = (
+            ["Дивизион", "Средний Total", "Лучший"]
+            if compact
+            else ["Дивизион", "Команд", "Средний Total", "Медиана",
+                  "Лучший", "Худший"]
+        )
+        st.dataframe(rating[rating_cols], use_container_width=True)
+        if not rating.empty:
+            st.caption(
+                f"Сильнейший дивизион: {rating.iloc[0]['Дивизион']} "
+                f"(средний Total {rating.iloc[0]['Средний Total']})."
+            )
+
+    # --- Быстрая навигация по дивизионам ---
+    available = [
+        lg for lg in ALL_LEAGUES if not df[df["league_tier"] == lg].empty
+    ]
+    if not available:
+        st.info("Нет данных ни по одному дивизиону.")
+    else:
+        nav_options = available + ["Все лиги"]
+        selected_league = st.radio(
+            "Дивизион",
+            options=nav_options,
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        to_show = available if selected_league == "Все лиги" else [selected_league]
+        for league_name in to_show:
+            table = league_table(df, league_name)
+            if not table.empty:
+                st.subheader(league_name)
+                render_league_html(table)
 
 with tab_cups:
     mode, payload = calculate_european_cups(df, current_gw)
@@ -1312,3 +1521,10 @@ with tab_wallet:
         )
         + "."
     )
+
+
+st.markdown(
+    '<div class="fpl-footer">FPL Syndicate © 2026 | '
+    'Разработано для участников Синдиката</div>',
+    unsafe_allow_html=True,
+)
