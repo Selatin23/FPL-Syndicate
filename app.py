@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import re
 import uuid
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 APP_VERSION = "v2.6"
 SEASON_LABEL = "2026"
@@ -18,6 +20,105 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ---------- Порядок вкладок ----------
+
+TAB_LEAGUES = "🏆 Лиги"
+TAB_SOCIAL = "💬 Сообщество"
+TAB_CUPS = "🌍 Еврокубки"
+TAB_SQUID = "🦑 Squid Game"
+TAB_FAME = "🥇 Зал Славы"
+TAB_WALLET = "💰 Финансы"
+
+TAB_LABELS = [
+    TAB_LEAGUES, TAB_SOCIAL, TAB_CUPS, TAB_SQUID, TAB_FAME, TAB_WALLET,
+]
+
+# Человекочитаемые пути для GA4 (эмодзи в URL читать неудобно)
+TAB_PATHS = {
+    TAB_LEAGUES: "/leagues",
+    TAB_SOCIAL: "/community",
+    TAB_CUPS: "/eurocups",
+    TAB_SQUID: "/squid-game",
+    TAB_FAME: "/hall-of-fame",
+    TAB_WALLET: "/finance",
+}
+
+# ---------- Google Analytics 4 ----------
+
+GA_PLACEHOLDER = "G-XXXXXXXXXX"
+
+
+def inject_ga():
+    """Подключает gtag.js и шлёт page_view при переключении вкладок.
+
+    Возвращает (measurement_id, активен ли счётчик).
+    """
+    ga_id = st.secrets.get("GA_MEASUREMENT_ID", GA_PLACEHOLDER)
+    if not ga_id or ga_id == GA_PLACEHOLDER:
+        # Заглушка — не шлём данные в несуществующее свойство
+        return ga_id, False
+
+    paths_json = json.dumps(TAB_PATHS, ensure_ascii=False)
+    ga_code = f"""
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id={ga_id}"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){{dataLayer.push(arguments);}}
+  gtag('js', new Date());
+
+  // Компонент живёт в iframe, поэтому адрес страницы берём у родителя,
+  // иначе в отчётах GA4 окажется about:srcdoc.
+  var pageUrl = document.referrer || location.href;
+  try {{ pageUrl = window.parent.location.href; }} catch (e) {{}}
+
+  gtag('config', '{ga_id}', {{
+    page_location: pageUrl,
+    page_title: 'FPL Syndicate 2026'
+  }});
+
+  var TAB_PATHS = {paths_json};
+
+  function trackTab(label) {{
+    var path = TAB_PATHS[label] || '/' + label;
+    gtag('event', 'page_view', {{
+      page_title: label,
+      page_path: path,
+      page_location: pageUrl.split('#')[0] + '#' + path.slice(1)
+    }});
+  }}
+
+  try {{
+    var doc = window.parent.document;
+
+    // Стартовый просмотр: активная вкладка при загрузке
+    var active = doc.querySelector('button[data-baseweb="tab"][aria-selected="true"]');
+    if (active) {{ trackTab(active.innerText.trim()); }}
+
+    // Делегирование на body: переживает перерисовку вкладок при rerun.
+    // Флаг на window родителя не даёт навесить обработчик дважды.
+    if (!window.parent.__fplGaTabsBound) {{
+      window.parent.__fplGaTabsBound = true;
+      doc.body.addEventListener('click', function (ev) {{
+        var btn = ev.target.closest
+          ? ev.target.closest('button[data-baseweb="tab"]')
+          : null;
+        if (btn) {{ trackTab(btn.innerText.trim()); }}
+      }}, true);
+    }}
+  }} catch (e) {{
+    // Кросс-доменные ограничения — просмотры вкладок недоступны,
+    // базовый page_view при этом всё равно отправлен.
+  }}
+</script>
+"""
+    components.html(ga_code, height=0)
+    return ga_id, True
+
+
+GA_ID, GA_ACTIVE = inject_ga()
+
 
 # ---------- Кастомный стиль ----------
 
@@ -1450,11 +1551,8 @@ METRICS_PER_ROW = 2 if compact else 4
 # ---------- Вывод: вкладки ----------
 
 (
-    tab_leagues, tab_cups, tab_squid, tab_fame, tab_wallet, tab_social
-) = st.tabs(
-    ["🏆 Лиги", "🌍 Еврокубки", "🦑 Squid Game", "🏅 Зал Славы", "💰 Финансы",
-     "💬 Сообщество"]
-)
+    tab_leagues, tab_social, tab_cups, tab_squid, tab_fame, tab_wallet
+) = st.tabs(TAB_LABELS)
 
 with tab_leagues:
     if h2h_matches_by_tier:
@@ -1674,7 +1772,7 @@ with tab_squid:
 with tab_fame:
     record, champion, leaders = calculate_hall_of_fame(df)
 
-    st.header("🏅 Зал Славы — рекорды сезона")
+    st.header("🥇 Зал Славы — рекорды сезона")
 
     metric_grid(
         [
