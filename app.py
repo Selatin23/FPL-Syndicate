@@ -49,12 +49,21 @@ TAB_PATHS = {
 GA_PLACEHOLDER = "G-XXXXXXXXXX"
 
 
+def secret(key: str, default=None):
+    """Безопасное чтение секрета: без secrets.toml st.secrets бросает
+    StreamlitSecretNotFoundError, а не возвращает default."""
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+
 def inject_ga():
     """Подключает gtag.js и шлёт page_view при переключении вкладок.
 
     Возвращает (measurement_id, активен ли счётчик).
     """
-    ga_id = st.secrets.get("GA_MEASUREMENT_ID", GA_PLACEHOLDER)
+    ga_id = secret("GA_MEASUREMENT_ID", GA_PLACEHOLDER)
     if not ga_id or ga_id == GA_PLACEHOLDER:
         # Заглушка — не шлём данные в несуществующее свойство
         return ga_id, False
@@ -158,7 +167,16 @@ st.markdown(
         font-weight: 700;
     }
 
-    div[data-testid="stDataFrame"] { font-size: 0.85rem; }
+    div[data-testid="stDataFrame"] {
+        font-size: 0.85rem;
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid rgba(128, 128, 128, 0.22);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+    /* Горизонтальный скролл таблиц на смартфонах без ломки вёрстки */
+    div[data-testid="stDataFrame"] > div { max-width: 100%; overflow-x: auto; }
+    div[data-testid="stDataFrameResizable"] { min-width: 0; }
 
     /* Баннер */
     .fpl-banner {
@@ -182,21 +200,6 @@ st.markdown(
         border: 1px solid rgba(0, 223, 122, 0.45);
     }
 
-    /* HTML-таблицы лиг с кликабельными командами */
-    .fpl-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-    .fpl-table th, .fpl-table td {
-        padding: 0.4rem 0.5rem;
-        border-bottom: 1px solid rgba(128, 128, 128, 0.2);
-        text-align: right;
-        white-space: nowrap;
-    }
-    .fpl-table th { text-align: right; font-size: 0.78rem; opacity: 0.8; }
-    .fpl-table td:nth-child(1), .fpl-table th:nth-child(1) { text-align: left; }
-    .fpl-table td:nth-child(2), .fpl-table th:nth-child(2) { text-align: left; }
-    .fpl-table tbody tr:hover { background: rgba(0, 223, 122, 0.07); }
-    .fpl-table a { text-decoration: none; font-weight: 600; }
-    .fpl-table a:hover { text-decoration: underline; }
-    .fpl-wrap { overflow-x: auto; }
 
     /* Карточки постов социальной ленты */
     .fpl-post-head {
@@ -1409,24 +1412,8 @@ df["total_pts"] = sum_gw_range(df, 1, current_gw)
 gw_cols_all = get_gw_cols(df)
 gw_cols_display = gw_cols_all[-5:]
 
-H2H_COL_LABELS = {
-    "team_name": "Команда",
-    "manager_name": "Менеджер",
-    "h2h_pts": "Очки H2H",
-    "wins": "В",
-    "draws": "Н",
-    "losses": "П",
-    "total_pts": "Total",
-    "team_value": "Стоимость",
-}
-
 FPL_ENTRY_URL = "https://fantasy.premierleague.com/entry/{team_id}/event/1"
 
-DISPLAY_COLS = (
-    ["team_name", "manager_name", "h2h_pts", "wins", "draws", "losses"]
-    + gw_cols_display
-    + ["total_pts", "team_value"]
-)
 
 
 def league_table(data: pd.DataFrame, tier: str) -> pd.DataFrame:
@@ -1438,47 +1425,103 @@ def league_table(data: pd.DataFrame, tier: str) -> pd.DataFrame:
     table = calculate_h2h_table(
         league_df, current_gw, h2h_matches_by_tier.get(tier)
     )
-    table = (
-        table.sort_values(
-            ["h2h_pts", "total_pts"], ascending=[False, False]
-        )
+    return (
+        table.sort_values(["h2h_pts", "total_pts"], ascending=[False, False])
         .reset_index(drop=True)
     )
-    table.index = table.index + 1  # место в таблице с 1
-    cols = ["team_id"] + [c for c in DISPLAY_COLS if c != "team_id"]
-    return table[cols].rename(columns=H2H_COL_LABELS)
 
 
-def render_league_html(table: pd.DataFrame):
-    """Таблица лиги с названием команды как ссылкой на профиль FPL."""
-    show = table.drop(columns=["team_id"])
-    header = "".join(f"<th>{c}</th>" for c in ["#"] + list(show.columns))
+def form_series(row, gw: int, n: int = 5) -> list:
+    """Очки за последние n туров — для мини-графика формы."""
+    start = max(1, gw - n + 1)
+    return [
+        int(row.get(gw_col(i), 0) or 0)
+        for i in range(start, gw + 1)
+        if gw_col(i) in row.index
+    ]
 
-    body = []
-    for place, (idx, row) in enumerate(show.iterrows(), start=1):
-        team_id = int(table.loc[idx, "team_id"])
-        url = FPL_ENTRY_URL.format(team_id=team_id)
-        cells = []
-        for col in show.columns:
-            value = row[col]
-            if col == "Команда":
-                cells.append(
-                    f'<td><a href="{url}" target="_blank" '
-                    f'rel="noopener">{value}</a></td>'
-                )
-            elif isinstance(value, float):
-                cells.append(
-                    "<td>—</td>" if pd.isna(value) else f"<td>{value:.1f}</td>"
-                )
-            else:
-                cells.append(f"<td>{value}</td>")
-        body.append(f"<tr><td>{place}</td>{''.join(cells)}</tr>")
 
-    st.markdown(
-        '<div class="fpl-wrap"><table class="fpl-table">'
-        f"<thead><tr>{header}</tr></thead>"
-        f"<tbody>{''.join(body)}</tbody></table></div>",
-        unsafe_allow_html=True,
+def zone_style(n_rows: int):
+    """Подсветка строк: топ-3 — золото/зелень, последние 3 — мягкий красный."""
+    def _style(row):
+        pos = row.name  # позиция после reset_index: 0-based
+        if pos == 0:
+            color = "rgba(255, 215, 0, 0.22)"
+        elif pos in (1, 2):
+            color = "rgba(0, 223, 122, 0.16)"
+        elif pos >= n_rows - 3:
+            color = "rgba(220, 60, 60, 0.15)"
+        else:
+            return [""] * len(row)
+        return [f"background-color: {color}"] * len(row)
+
+    return _style
+
+
+def render_league_table(table: pd.DataFrame, tier: str):
+    """Таблица лиги: прогресс-бары, мини-график формы, ссылка на профиль."""
+    view = pd.DataFrame(
+        {
+            "Место": range(1, len(table) + 1),
+            "Команда": table["team_name"].values,
+            "Менеджер": table["manager_name"].values,
+            "Очки H2H": table["h2h_pts"].values,
+            "В": table["wins"].values,
+            "Н": table["draws"].values,
+            "П": table["losses"].values,
+            "Форма": [
+                form_series(row, current_gw) for _, row in table.iterrows()
+            ],
+            "Total": table["total_pts"].values,
+            "Профиль": [
+                FPL_ENTRY_URL.format(team_id=int(t)) for t in table["team_id"]
+            ],
+        }
+    )
+
+    max_h2h = max(int(view["Очки H2H"].max()), 1)
+    max_total = max(int(view["Total"].max()), 1)
+
+    config = {
+        "Место": st.column_config.NumberColumn("#", width="small"),
+        "Команда": st.column_config.TextColumn("Команда", width="medium"),
+        "Менеджер": st.column_config.TextColumn("Менеджер", width="medium"),
+        "Очки H2H": st.column_config.ProgressColumn(
+            "Очки H2H",
+            help="3 за победу, 1 за ничью, 0 за поражение",
+            format="%d",
+            min_value=0,
+            max_value=max_h2h,
+        ),
+        "В": st.column_config.NumberColumn("В", width="small"),
+        "Н": st.column_config.NumberColumn("Н", width="small"),
+        "П": st.column_config.NumberColumn("П", width="small"),
+        "Форма": st.column_config.LineChartColumn(
+            "Форма (5 туров)",
+            help="Очки за последние 5 сыгранных туров",
+            y_min=0,
+        ),
+        "Total": st.column_config.ProgressColumn(
+            "Total",
+            format="%d",
+            min_value=0,
+            max_value=max_total,
+        ),
+        "Профиль": st.column_config.LinkColumn(
+            "FPL", display_text="Открыть ↗", width="small"
+        ),
+    }
+
+    if compact:
+        drop = ["Менеджер", "В", "Н", "П"]
+        view = view.drop(columns=drop)
+        config = {k: v for k, v in config.items() if k not in drop}
+
+    st.dataframe(
+        view.style.apply(zone_style(len(view)), axis=1),
+        column_config=config,
+        hide_index=True,
+        use_container_width=True,
     )
 
 
@@ -1521,17 +1564,6 @@ compact = st.sidebar.toggle(
     value=True,
     help="Меньше колонок в таблицах, метрики в два ряда.",
 )
-
-# Наборы колонок таблиц лиг: полный для десктопа, ужатый для телефона
-if compact:
-    DISPLAY_COLS = ["team_name", "h2h_pts", "wins", "draws", "losses",
-                    "total_pts"]
-else:
-    DISPLAY_COLS = (
-        ["team_name", "manager_name", "h2h_pts", "wins", "draws", "losses"]
-        + gw_cols_display
-        + ["total_pts", "team_value"]
-    )
 
 
 def metric_grid(items, per_row):
@@ -1607,7 +1639,7 @@ with tab_leagues:
             table = league_table(df, league_name)
             if not table.empty:
                 st.subheader(league_name)
-                render_league_html(table)
+                render_league_table(table, league_name)
 
 with tab_cups:
     mode, payload = calculate_european_cups(df, current_gw)
@@ -1738,34 +1770,61 @@ with tab_squid:
             return "DEAD (ранее)"
 
         table["Статус"] = [squid_status(i) for i in table.index]
-        squid_cols = (
-            ["team_name", "gw_pts", "Статус"]
-            if compact
-            else ["team_name", "manager_name", "league_tier", "gw_pts", "Статус"]
+        table = table.sort_values("gw_pts", ascending=False).reset_index(
+            drop=True
         )
-        table = (
-            table.sort_values("gw_pts", ascending=False)
-            .reset_index(drop=True)[squid_cols]
-            .rename(
-                columns={
-                    "team_name": "Команда",
-                    "manager_name": "Менеджер",
-                    "league_tier": "Лига",
-                    "gw_pts": f"Очки GW{gw}",
-                }
-            )
+
+        squid_view = pd.DataFrame(
+            {
+                "Место": range(1, len(table) + 1),
+                "Команда": table["team_name"].values,
+                "Менеджер": table["manager_name"].values,
+                "Лига": table["league_tier"].values,
+                "Очки тура": table["gw_pts"].values,
+                "Форма": [
+                    form_series(row, gw) for _, row in table.iterrows()
+                ],
+                "Статус": table["Статус"].values,
+            }
         )
-        table.index = table.index + 1
+
+        max_gw_pts = max(int(squid_view["Очки тура"].max()), 1)
+        squid_config = {
+            "Место": st.column_config.NumberColumn("#", width="small"),
+            "Команда": st.column_config.TextColumn("Команда", width="medium"),
+            "Менеджер": st.column_config.TextColumn("Менеджер", width="medium"),
+            "Лига": st.column_config.TextColumn("Лига", width="small"),
+            "Очки тура": st.column_config.ProgressColumn(
+                f"Очки GW{gw}",
+                help=f"Порог выживания — {last_round['avg']:.2f}",
+                format="%d",
+                min_value=0,
+                max_value=max_gw_pts,
+            ),
+            "Форма": st.column_config.LineChartColumn(
+                "Форма (5 туров)", y_min=0
+            ),
+            "Статус": st.column_config.TextColumn("Статус", width="medium"),
+        }
+
+        if compact:
+            drop = ["Менеджер", "Лига"]
+            squid_view = squid_view.drop(columns=drop)
+            squid_config = {
+                k: v for k, v in squid_config.items() if k not in drop
+            }
 
         def color_status(val):
-            if "WINNER" in val:
-                return "background-color: #FFD700; color: #000000"
+            if "WINNER" in str(val):
+                return "background-color: rgba(255, 215, 0, 0.3)"
             if val == "ALIVE":
-                return "background-color: #1E7A46; color: #FFFFFF"
-            return "background-color: #8B1E1E; color: #FFFFFF"
+                return "background-color: rgba(0, 223, 122, 0.18)"
+            return "background-color: rgba(220, 60, 60, 0.16)"
 
         st.dataframe(
-            table.style.map(color_status, subset=["Статус"]),
+            squid_view.style.map(color_status, subset=["Статус"]),
+            column_config=squid_config,
+            hide_index=True,
             use_container_width=True,
         )
 
