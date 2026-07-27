@@ -46,6 +46,7 @@ TAB_PATHS = {
 
 # ---------- Google Analytics 4 ----------
 
+GA_DEFAULT_ID = "G-LTZ72RKJ6E"
 GA_PLACEHOLDER = "G-XXXXXXXXXX"
 
 
@@ -59,39 +60,68 @@ def secret(key: str, default=None):
 
 
 def inject_ga():
-    """Подключает gtag.js и шлёт page_view при переключении вкладок.
+    """Ставит тег gtag.js в <head> родительского документа.
+
+    Компонент живёт в iframe, поэтому скрипт, вставленный «внутри себя»,
+    робот Google на fpl-syndicate.streamlit.app не увидит. Поэтому тег
+    добавляется в head родителя, а dataLayer заводится на его window.
 
     Возвращает (measurement_id, активен ли счётчик).
     """
-    ga_id = secret("GA_MEASUREMENT_ID", GA_PLACEHOLDER)
+    ga_id = secret("GA_MEASUREMENT_ID", GA_DEFAULT_ID)
     if not ga_id or ga_id == GA_PLACEHOLDER:
-        # Заглушка — не шлём данные в несуществующее свойство
         return ga_id, False
 
     paths_json = json.dumps(TAB_PATHS, ensure_ascii=False)
     ga_code = f"""
 <!-- Global site tag (gtag.js) - Google Analytics -->
-<script async src="https://www.googletagmanager.com/gtag/js?id={ga_id}"></script>
 <script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){{dataLayer.push(arguments);}}
-  gtag('js', new Date());
-
-  // Компонент живёт в iframe, поэтому адрес страницы берём у родителя,
-  // иначе в отчётах GA4 окажется about:srcdoc.
-  var pageUrl = document.referrer || location.href;
-  try {{ pageUrl = window.parent.location.href; }} catch (e) {{}}
-
-  gtag('config', '{ga_id}', {{
-    page_location: pageUrl,
-    page_title: 'FPL Syndicate 2026'
-  }});
-
+(function () {{
+  var GA_ID = '{ga_id}';
   var TAB_PATHS = {paths_json};
+
+  // Работаем с родительским документом; если он недоступен
+  // (кросс-доменные ограничения) — откатываемся на собственное окно.
+  var win = window, doc = document;
+  try {{
+    if (window.parent && window.parent.document) {{
+      win = window.parent;
+      doc = window.parent.document;
+    }}
+  }} catch (e) {{}}
+
+  var pageUrl;
+  try {{ pageUrl = win.location.href; }}
+  catch (e) {{ pageUrl = document.referrer || location.href; }}
+
+  function gtag() {{ win.dataLayer.push(arguments); }}
+
+  if (!win.__fplGaLoaded) {{
+    win.__fplGaLoaded = true;
+    win.dataLayer = win.dataLayer || [];
+    win.gtag = gtag;
+
+    // Сам тег — в <head> родителя, чтобы Google видел его на странице
+    var src = 'https://www.googletagmanager.com/gtag/js?id=' + GA_ID;
+    if (!doc.querySelector('script[src="' + src + '"]')) {{
+      var s = doc.createElement('script');
+      s.async = true;
+      s.src = src;
+      (doc.head || doc.documentElement).appendChild(s);
+    }}
+
+    gtag('js', new Date());
+    gtag('config', GA_ID, {{
+      page_location: pageUrl,
+      page_title: 'FPL Syndicate 2026'
+    }});
+  }}
+
+  var send = win.gtag || gtag;
 
   function trackTab(label) {{
     var path = TAB_PATHS[label] || '/' + label;
-    gtag('event', 'page_view', {{
+    send('event', 'page_view', {{
       page_title: label,
       page_path: path,
       page_location: pageUrl.split('#')[0] + '#' + path.slice(1)
@@ -99,16 +129,21 @@ def inject_ga():
   }}
 
   try {{
-    var doc = window.parent.document;
-
-    // Стартовый просмотр: активная вкладка при загрузке
-    var active = doc.querySelector('button[data-baseweb="tab"][aria-selected="true"]');
-    if (active) {{ trackTab(active.innerText.trim()); }}
+    // Стартовый просмотр — один раз за загрузку страницы.
+    // Дальнейшие переходы ловит обработчик кликов ниже, иначе каждый
+    // rerun (движение слайдера) слал бы лишний page_view.
+    if (!win.__fplGaInitialView) {{
+      win.__fplGaInitialView = true;
+      var active = doc.querySelector(
+        'button[data-baseweb="tab"][aria-selected="true"]'
+      );
+      if (active) {{ trackTab(active.innerText.trim()); }}
+    }}
 
     // Делегирование на body: переживает перерисовку вкладок при rerun.
-    // Флаг на window родителя не даёт навесить обработчик дважды.
-    if (!window.parent.__fplGaTabsBound) {{
-      window.parent.__fplGaTabsBound = true;
+    // Флаг не даёт навесить обработчик повторно.
+    if (!win.__fplGaTabsBound && doc.body) {{
+      win.__fplGaTabsBound = true;
       doc.body.addEventListener('click', function (ev) {{
         var btn = ev.target.closest
           ? ev.target.closest('button[data-baseweb="tab"]')
@@ -117,9 +152,9 @@ def inject_ga():
       }}, true);
     }}
   }} catch (e) {{
-    // Кросс-доменные ограничения — просмотры вкладок недоступны,
-    // базовый page_view при этом всё равно отправлен.
+    // Просмотры вкладок недоступны; базовый page_view уже отправлен.
   }}
+}})();
 </script>
 """
     components.html(ga_code, height=0)
