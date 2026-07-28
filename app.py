@@ -1586,12 +1586,54 @@ def division_rating(data: pd.DataFrame) -> pd.DataFrame:
     return rating
 
 
-# Селектор менеджера для Финансового Хаба (поиск набором текста)
-st.sidebar.header("Кошелёк менеджера")
-selected_manager = st.sidebar.selectbox(
-    "Менеджер",
-    options=sorted(df["manager_name"].astype(str).unique()),
-)
+# ---------- Глобальная авторизация ----------
+
+st.sidebar.header("🔐 Авторизация")
+
+
+def logout():
+    """Полный выход: чистим всё, что относится к сессии пользователя."""
+    for key in ("logged_in", "current_user", "current_tier", "verified_manager"):
+        st.session_state.pop(key, None)
+
+
+if st.session_state.get("logged_in"):
+    st.sidebar.success(f"👤 {st.session_state['current_user']}")
+    if st.session_state.get("current_tier"):
+        st.sidebar.caption(f"Дивизион: {st.session_state['current_tier']}")
+    if st.sidebar.button("Выйти", use_container_width=True):
+        logout()
+        st.rerun()
+elif not pin_map:
+    st.sidebar.info(
+        "Вход недоступен: не загрузился список участников из админ-таблицы."
+    )
+else:
+    login_name = st.sidebar.selectbox(
+        "Менеджер", options=sorted(pin_map.keys()), key="login_name"
+    )
+    login_pin = st.sidebar.text_input(
+        "PIN-код (последние 4 цифры телефона)",
+        type="password",
+        max_chars=4,
+        key="login_pin",
+    )
+    if st.sidebar.button("Войти", type="primary", use_container_width=True):
+        if login_pin.strip() and login_pin.strip() == pin_map.get(login_name):
+            st.session_state["logged_in"] = True
+            st.session_state["current_user"] = login_name
+            tier_rows = df.loc[
+                df["manager_name"].astype(str) == login_name, "league_tier"
+            ]
+            st.session_state["current_tier"] = (
+                tier_rows.iloc[0] if not tier_rows.empty else None
+            )
+            st.rerun()
+        else:
+            st.sidebar.error("❌ Неверный PIN-код")
+
+current_user = st.session_state.get("current_user")
+is_logged_in = bool(st.session_state.get("logged_in"))
 
 st.sidebar.header("Отображение")
 compact = st.sidebar.toggle(
@@ -1923,8 +1965,21 @@ with tab_wallet:
 
     payouts = calculate_prizes(df, current_gw)
 
-    # --- Персональная карточка выбранного менеджера ---
-    row = df[df["manager_name"].astype(str) == selected_manager]
+    # --- Персональная карточка авторизованного менеджера ---
+    if not is_logged_in:
+        st.info(
+            "Авторизуйтесь в боковом меню слева, чтобы увидеть свой кошелёк. "
+            "Общая таблица призовых доступна ниже."
+        )
+        row = df.iloc[0:0]
+    else:
+        row = df[df["manager_name"].astype(str) == current_user]
+        if row.empty:
+            st.info(
+                f"{current_user} не найден в данных сезона — "
+                "персональная карточка недоступна."
+            )
+
     if not row.empty:
         m = row.iloc[0]
         m_idx = row.index[0]
@@ -2020,33 +2075,15 @@ with tab_social:
             "Supabase в `.streamlit/secrets.toml`, чтобы включить сохранение."
         )
 
-    # --- Форма публикации с верификацией автора ---
-    with st.expander("✍️ Написать пост / Опубликовать мем", expanded=False):
-        if not pin_map:
-            st.error(
-                "Список участников 2026 недоступен (не загрузилась "
-                "админ-таблица), поэтому верификация авторов не работает "
-                "и публикация закрыта."
-            )
-        else:
-            managers = sorted(pin_map.keys())
-            author = st.selectbox("Автор (участник 2026)", options=managers)
-            pin = st.text_input(
-                "Введи PIN-код (последние 4 цифры вашего номера телефона)",
-                type="password",
-                max_chars=4,
-            )
-
-            expected = pin_map.get(author)
-            verified = bool(pin) and pin.strip() == expected
-            if verified:
-                st.session_state["verified_manager"] = author
-                st.success("✅ Автор верифицирован")
-            elif pin:
-                st.session_state.pop("verified_manager", None)
-                st.error("❌ Неверный PIN-код")
-            else:
-                st.caption("Введи PIN, чтобы активировать публикацию.")
+    # --- Форма публикации: автор берётся из глобальной авторизации ---
+    if not is_logged_in:
+        st.warning(
+            "Пожалуйста, авторизуйтесь в боковом меню слева, "
+            "чтобы писать посты."
+        )
+    else:
+        with st.expander("✍️ Написать пост / Опубликовать мем", expanded=False):
+            st.caption(f"Публикация от имени: **{current_user}**")
 
             category = st.radio(
                 "Категория",
@@ -2064,9 +2101,7 @@ with tab_social:
                 placeholder="https://...",
             )
 
-            if st.button(
-                "Опубликовать 🚀", type="primary", disabled=not verified
-            ):
+            if st.button("Опубликовать 🚀", type="primary"):
                 image_ref, img_error = encode_image(upload)
                 if img_error:
                     st.error(img_error)
@@ -2079,9 +2114,9 @@ with tab_social:
                     post = {
                         "id": str(uuid.uuid4()),  # для демо-режима; в БД свой
                         "created_at": datetime.now(timezone.utc).isoformat(),
-                        "manager_name": author,
+                        "manager_name": current_user,
                         "fpl_team_id": int(
-                            manager_team_map.get(author, 0)
+                            manager_team_map.get(current_user, 0)
                         ),
                         "category": category,
                         COL_TEXT: body.strip(),
