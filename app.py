@@ -27,11 +27,13 @@ TAB_LEAGUES = "🏆 Лиги"
 TAB_SOCIAL = "💬 Сообщество"
 TAB_CUPS = "🌍 Еврокубки"
 TAB_SQUID = "🦑 Squid Game"
+TAB_CONQUEST = "🗺️ Conquest"
 TAB_FAME = "🥇 Зал Славы"
 TAB_WALLET = "💰 Финансы"
 
 TAB_LABELS = [
-    TAB_LEAGUES, TAB_SOCIAL, TAB_CUPS, TAB_SQUID, TAB_FAME, TAB_WALLET,
+    TAB_LEAGUES, TAB_SOCIAL, TAB_CUPS, TAB_SQUID, TAB_CONQUEST,
+    TAB_FAME, TAB_WALLET,
 ]
 
 # Человекочитаемые пути для GA4 (эмодзи в URL читать неудобно)
@@ -40,6 +42,7 @@ TAB_PATHS = {
     TAB_SOCIAL: "/community",
     TAB_CUPS: "/eurocups",
     TAB_SQUID: "/squid-game",
+    TAB_CONQUEST: "/conquest",
     TAB_FAME: "/hall-of-fame",
     TAB_WALLET: "/finance",
 }
@@ -275,6 +278,45 @@ st.markdown(
         white-space: pre-wrap;
         word-break: break-word;
         margin: 0.25rem 0 0.15rem 0;
+    }
+
+    /* Карта Conquest */
+    .conq-grid {
+        display: grid;
+        gap: 3px;
+        margin: 0.4rem 0 0.6rem 0;
+        max-width: 520px;
+    }
+    .conq-cell {
+        position: relative;
+        aspect-ratio: 1 / 1;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0.88;
+        border: 1px solid rgba(0, 0, 0, 0.25);
+    }
+    .conq-icon { font-size: clamp(0.6rem, 2.6vw, 1.05rem); line-height: 1; }
+    .conq-hp {
+        position: absolute;
+        left: 8%; right: 8%; bottom: 6%;
+        height: 3px;
+        border-radius: 2px;
+        background: rgba(0, 0, 0, 0.45);
+        overflow: hidden;
+    }
+    .conq-hp i { display: block; height: 100%; background: #FFFFFF; }
+    .conq-capital { border: 2px solid #FFFFFF; }
+    .conq-center {
+        border: 2px solid #FFD700;
+        box-shadow: 0 0 10px rgba(255, 215, 0, 0.65);
+    }
+    .conq-selected { outline: 3px solid #00DF7A; outline-offset: 1px; }
+    .conq-legend { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.72rem; }
+    .conq-legend-item { display: inline-flex; align-items: center; gap: 0.25rem; }
+    .conq-legend-item i {
+        width: 0.7rem; height: 0.7rem; border-radius: 3px; display: inline-block;
     }
 
     /* Футер */
@@ -1326,6 +1368,280 @@ def sort_posts(posts: list[dict], mode: str, gw: int) -> list[dict]:
     return sorted(posts, key=created, reverse=True)  # ⏱️ Свежее
 
 
+# ---------- Модуль 6: Syndicate Conquest ----------
+
+CONQUEST_GRID = 9  # нечётный размер: 8 столиц по периметру + ровно один центр
+
+# Цвета дивизионов на карте
+TIER_COLORS = {
+    "Premier League": "#8B5CF6",
+    "A-1": "#0EA5E9",
+    "A-2": "#22C55E",
+    "B-1": "#F59E0B",
+    "B-2": "#EF4444",
+    "B-3": "#EC4899",
+    "C": "#14B8A6",
+    "D": "#A16207",
+}
+NEUTRAL_COLOR = "#6B7280"
+
+BUILDINGS = {
+    "stadium": {"icon": "🏟️", "name": "Стадион", "cost": 150,
+                "effect": "+40 к прочности клетки"},
+    "siege": {"icon": "🥊", "name": "Осадный зал", "cost": 200,
+              "effect": "+10 к урону всех атак дивизиона"},
+    "training": {"icon": "🥤", "name": "Тренировочная база", "cost": 120,
+                 "effect": "источник CP"},
+}
+
+COST_ATTACK = 100
+COST_FORTIFY = 50
+BASE_DAMAGE = 25
+SIEGE_BONUS = 10
+MAX_DAMAGE = 60
+FORTIFY_HEAL = 30
+
+
+def conquest_rpc(fn: str, payload: dict):
+    """Вызов SQL-функции Supabase. Возвращает (результат, текст ошибки)."""
+    url, key = supabase_config()
+    if not url:
+        return None, "offline"
+    try:
+        resp = requests.post(
+            f"{url}/rest/v1/rpc/{fn}",
+            headers=_sb_headers(key),
+            json=payload,
+            timeout=15,
+        )
+        if not resp.ok:
+            return None, _sb_error(resp)
+        return resp.json(), None
+    except requests.exceptions.RequestException as e:
+        return None, str(e)
+
+
+def seed_conquest_map(size: int = CONQUEST_GRID) -> list[dict]:
+    """Стартовая карта — та же раскладка, что в SQL-функции conquest_seed_map."""
+    mid = size // 2
+    tiles = []
+    for y in range(size):
+        for x in range(size):
+            center = (x == mid and y == mid)
+            tiles.append(
+                {
+                    "id": y * size + x, "x": x, "y": y,
+                    "owner_tier": None,
+                    "hp": 300 if center else 100,
+                    "max_hp": 300 if center else 100,
+                    "building": None,
+                    "is_center": center, "is_capital": False,
+                }
+            )
+    capitals = [
+        (0, 0), (mid, 0), (size - 1, 0), (size - 1, mid),
+        (size - 1, size - 1), (mid, size - 1), (0, size - 1), (0, mid),
+    ]
+    by_xy = {(t["x"], t["y"]): t for t in tiles}
+    for tier, (cx, cy) in zip(ALL_LEAGUES, capitals):
+        t = by_xy[(cx, cy)]
+        t.update(owner_tier=tier, is_capital=True, hp=200, max_hp=200,
+                 building="stadium")
+    return tiles
+
+
+def fetch_conquest_tiles() -> list[dict]:
+    """Карта из Supabase; в офлайне — локальная демо-карта."""
+    url, key = supabase_config()
+    if not url:
+        if "conquest_tiles" not in st.session_state:
+            st.session_state["conquest_tiles"] = seed_conquest_map()
+        return st.session_state["conquest_tiles"]
+    try:
+        resp = requests.get(
+            f"{url}/rest/v1/conquest_tiles",
+            headers=_sb_headers(key),
+            params={"select": "*", "order": "id.asc", "limit": "400"},
+            timeout=10,
+        )
+        if not resp.ok:
+            st.warning(f"Карта недоступна: {_sb_error(resp)}")
+            return st.session_state.setdefault(
+                "conquest_tiles", seed_conquest_map()
+            )
+        data = resp.json()
+        if not data:
+            st.info(
+                "Карта в Supabase пуста. Выполни в SQL Editor: "
+                "`select public.conquest_seed_map(9);`"
+            )
+        return data
+    except (requests.exceptions.RequestException, ValueError) as e:
+        st.warning(f"Карта недоступна: {e}")
+        return st.session_state.setdefault(
+            "conquest_tiles", seed_conquest_map()
+        )
+
+
+def fetch_conquest_cp(manager: str) -> int | None:
+    """Баланс CP игрока. None — игрок не заведён в Conquest."""
+    url, key = supabase_config()
+    if not url:
+        return st.session_state.setdefault("conquest_cp", {}).setdefault(
+            manager, 500
+        )
+    try:
+        resp = requests.get(
+            f"{url}/rest/v1/conquest_players_public",
+            headers=_sb_headers(key),
+            params={"select": "cp", "manager_name": f"eq.{manager}"},
+            timeout=10,
+        )
+        if not resp.ok:
+            return None
+        rows = resp.json()
+        return int(rows[0]["cp"]) if rows else None
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        return None
+
+
+# Соседство 8-направленное: по стороне и по диагонали.
+# Диагонали уравнивают путь до центра для угловых и «серединных» столиц.
+NEIGHBOUR_OFFSETS = [
+    (dx, dy)
+    for dx in (-1, 0, 1)
+    for dy in (-1, 0, 1)
+    if (dx, dy) != (0, 0)
+]
+
+
+def tile_neighbours(tile: dict, tiles: list[dict]) -> list[dict]:
+    return [
+        t for t in tiles
+        if max(abs(t["x"] - tile["x"]), abs(t["y"] - tile["y"])) == 1
+    ]
+
+
+def attackable_tiles(tiles: list[dict], tier: str) -> list[dict]:
+    """Чужие и нейтральные клетки, граничащие с территорией дивизиона
+    по стороне или по диагонали."""
+    own = {(t["x"], t["y"]) for t in tiles if t["owner_tier"] == tier}
+    out = []
+    for t in tiles:
+        if t["owner_tier"] == tier:
+            continue
+        if any(
+            (t["x"] + dx, t["y"] + dy) in own for dx, dy in NEIGHBOUR_OFFSETS
+        ):
+            out.append(t)
+    return out
+
+
+def demo_action(action: str, manager: str, tier: str, tile_id: int,
+                building: str | None = None):
+    """Локальная копия правил для демо-режима без Supabase."""
+    tiles = st.session_state.setdefault("conquest_tiles", seed_conquest_map())
+    cp_map = st.session_state.setdefault("conquest_cp", {})
+    cp = cp_map.setdefault(manager, 500)
+    tile = next((t for t in tiles if t["id"] == tile_id), None)
+    if tile is None:
+        return None, "Клетка не найдена"
+
+    if action == "attack":
+        if tile["owner_tier"] == tier:
+            return None, "Клетка уже ваша"
+        if tile not in attackable_tiles(tiles, tier):
+            return None, "Клетка не граничит с вашей территорией"
+        if cp < COST_ATTACK:
+            return None, f"Недостаточно CP: нужно {COST_ATTACK}, есть {cp}"
+        sieges = sum(
+            1 for t in tiles
+            if t["owner_tier"] == tier and t["building"] == "siege"
+        )
+        damage = min(BASE_DAMAGE + SIEGE_BONUS * sieges, MAX_DAMAGE)
+        cp_map[manager] = cp - COST_ATTACK
+        tile["hp"] -= damage
+        captured = tile["hp"] <= 0
+        if captured:
+            tile["owner_tier"] = tier
+            tile["hp"] = max(tile["max_hp"] // 2, 1)
+            tile["building"] = None
+        return {"captured": captured, "damage": damage, "hp": tile["hp"]}, None
+
+    if action == "fortify":
+        if tile["owner_tier"] != tier:
+            return None, "Укреплять можно только свои клетки"
+        if tile["hp"] >= tile["max_hp"]:
+            return None, "Клетка уже на полной прочности"
+        if cp < COST_FORTIFY:
+            return None, f"Недостаточно CP: нужно {COST_FORTIFY}, есть {cp}"
+        cp_map[manager] = cp - COST_FORTIFY
+        tile["hp"] = min(tile["hp"] + FORTIFY_HEAL, tile["max_hp"])
+        return {"hp": tile["hp"]}, None
+
+    if action == "build":
+        if tile["owner_tier"] != tier:
+            return None, "Строить можно только на своих клетках"
+        if tile["building"]:
+            return None, "На клетке уже есть здание"
+        cost = BUILDINGS[building]["cost"]
+        if cp < cost:
+            return None, f"Недостаточно CP: нужно {cost}, есть {cp}"
+        cp_map[manager] = cp - cost
+        tile["building"] = building
+        if building == "stadium":
+            tile["max_hp"] += 40
+            tile["hp"] += 40
+        return {"building": building}, None
+
+    return None, "Неизвестное действие"
+
+
+def render_conquest_map(tiles: list[dict], size: int, selected_id=None):
+    """Карта на CSS Grid: цвет владельца, иконка здания, полоска прочности."""
+    cells = []
+    by_id = {t["id"]: t for t in tiles}
+    for tid in sorted(by_id):
+        t = by_id[tid]
+        color = TIER_COLORS.get(t["owner_tier"], NEUTRAL_COLOR)
+        hp_pct = max(0, min(100, round(100 * t["hp"] / max(t["max_hp"], 1))))
+        icon = BUILDINGS.get(t["building"], {}).get("icon", "")
+        if t["is_center"]:
+            icon = icon or "🏆"
+        classes = "conq-cell"
+        if t["is_center"]:
+            classes += " conq-center"
+        if t["is_capital"]:
+            classes += " conq-capital"
+        if selected_id is not None and t["id"] == selected_id:
+            classes += " conq-selected"
+        title = (
+            f"({t['x']},{t['y']}) "
+            f"{t['owner_tier'] or 'нейтральная'} · {t['hp']}/{t['max_hp']} HP"
+        )
+        cells.append(
+            f'<div class="{classes}" style="background:{color}" title="{title}">'
+            f'<span class="conq-icon">{icon}</span>'
+            f'<span class="conq-hp"><i style="width:{hp_pct}%"></i></span>'
+            f"</div>"
+        )
+
+    legend = "".join(
+        f'<span class="conq-legend-item">'
+        f'<i style="background:{TIER_COLORS[t]}"></i>{t}</span>'
+        for t in ALL_LEAGUES
+    )
+    st.markdown(
+        f'<div class="conq-grid" style="grid-template-columns:repeat({size},1fr)">'
+        + "".join(cells)
+        + "</div>"
+        + f'<div class="conq-legend">{legend}'
+        f'<span class="conq-legend-item"><i style="background:{NEUTRAL_COLOR}">'
+        "</i>нейтральные</span></div>",
+        unsafe_allow_html=True,
+    )
+
+
 # ---------- Выбор источника данных ----------
 
 if os.path.exists(LOGO_FILE):
@@ -1618,7 +1934,8 @@ METRICS_PER_ROW = 2 if compact else 4
 # ---------- Вывод: вкладки ----------
 
 (
-    tab_leagues, tab_social, tab_cups, tab_squid, tab_fame, tab_wallet
+    tab_leagues, tab_social, tab_cups, tab_squid, tab_conquest,
+    tab_fame, tab_wallet,
 ) = st.tabs(TAB_LABELS)
 
 with tab_leagues:
@@ -1862,6 +2179,204 @@ with tab_squid:
             hide_index=True,
             use_container_width=True,
         )
+
+with tab_conquest:
+    st.header("🗺️ Syndicate Conquest")
+    st.caption(
+        "8 дивизионов стартуют со столиц по краям карты и пробиваются к "
+        "золотому Уэмбли в центре. Атаковать можно клетку, граничащую с "
+        "вашей территорией по стороне или по диагонали."
+    )
+
+    conq_tiles = fetch_conquest_tiles()
+    grid_size = int(round(len(conq_tiles) ** 0.5)) or CONQUEST_GRID
+    offline = supabase_config()[0] is None
+
+    if offline:
+        st.warning(
+            "⚠️ Демо-режим: карта живёт только в этой сессии. Выполни "
+            "`supabase_conquest.sql` в Supabase, чтобы включить общую карту."
+        )
+
+    # --- Карта видна всем, даже без входа ---
+    selected_id = st.session_state.get("conq_selected")
+    render_conquest_map(conq_tiles, grid_size, selected_id)
+
+    center = next((t for t in conq_tiles if t.get("is_center")), None)
+    if center:
+        holder = center["owner_tier"] or "никем не занят"
+        st.caption(
+            f"🏆 Уэмбли ({center['x']},{center['y']}): {holder} · "
+            f"{center['hp']}/{center['max_hp']} HP"
+        )
+
+    # Кто сколько занял
+    holdings = {}
+    for t in conq_tiles:
+        if t["owner_tier"]:
+            holdings[t["owner_tier"]] = holdings.get(t["owner_tier"], 0) + 1
+    if holdings:
+        board = pd.DataFrame(
+            sorted(holdings.items(), key=lambda kv: -kv[1]),
+            columns=["Дивизион", "Клеток"],
+        )
+        board.index = range(1, len(board) + 1)
+        st.dataframe(board, use_container_width=True)
+
+    # --- Игрок: кто ходит ---
+    managers = sorted(pin_map.keys()) if pin_map else []
+    if not managers:
+        st.info(
+            "Действия недоступны: не загрузился список участников из "
+            "админ-таблицы. Карта показана в режиме просмотра."
+        )
+    else:
+        c1, c2 = st.columns(2)
+        conq_manager = c1.selectbox("Игрок", options=managers, key="conq_mgr")
+        conq_pin = c2.text_input(
+            "PIN (последние 4 цифры телефона)",
+            type="password", max_chars=4, key="conq_pin",
+        )
+        conq_tier = team_tier_map.get(
+            manager_team_map.get(conq_manager), None
+        ) or df.loc[
+            df["manager_name"] == conq_manager, "league_tier"
+        ].iloc[0] if (df["manager_name"] == conq_manager).any() else None
+
+        user_cp = fetch_conquest_cp(conq_manager)
+        cp_text = "—" if user_cp is None else f"{user_cp:,}".replace(",", " ")
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("🪙 Доступно Conquest Points (CP)", cp_text)
+        m2.metric("Дивизион", conq_tier or "—")
+        owned = sum(1 for t in conq_tiles if t["owner_tier"] == conq_tier)
+        m3.metric("Клеток у дивизиона", owned)
+
+        if user_cp is None and not offline:
+            st.info(
+                "Игрок ещё не заведён в Conquest. Админ добавляет участников "
+                "функцией `conquest_upsert_player(...)`."
+            )
+
+        # --- Управление ---
+        st.subheader("Действия")
+        if not conq_tier:
+            st.info("Не удалось определить дивизион игрока.")
+        else:
+            own_tiles = [t for t in conq_tiles if t["owner_tier"] == conq_tier]
+            targets = attackable_tiles(conq_tiles, conq_tier)
+
+            def tile_label(t):
+                who = t["owner_tier"] or "нейтральная"
+                mark = " 🏆" if t.get("is_center") else (
+                    " ⭐" if t.get("is_capital") else ""
+                )
+                b = BUILDINGS.get(t["building"], {}).get("icon", "")
+                return (
+                    f"({t['x']},{t['y']}) · {who}{mark} · "
+                    f"{t['hp']}/{t['max_hp']} HP {b}"
+                )
+
+            mode = st.radio(
+                "Что делаем",
+                ["⚔️ Атаковать", "🛡️ Укрепить / Починить", "🏗️ Построить"],
+                horizontal=not compact,
+            )
+
+            pool = targets if mode == "⚔️ Атаковать" else own_tiles
+            if not pool:
+                st.info(
+                    "Нет доступных клеток для этого действия."
+                    if mode == "⚔️ Атаковать"
+                    else "У дивизиона пока нет своих клеток."
+                )
+            else:
+                choice = st.selectbox(
+                    "Клетка",
+                    options=sorted(pool, key=lambda t: (t["y"], t["x"])),
+                    format_func=tile_label,
+                )
+                st.session_state["conq_selected"] = choice["id"]
+
+                building = None
+                if mode == "🏗️ Построить":
+                    building = st.selectbox(
+                        "Здание",
+                        options=list(BUILDINGS),
+                        format_func=lambda b: (
+                            f"{BUILDINGS[b]['icon']} {BUILDINGS[b]['name']} "
+                            f"({BUILDINGS[b]['cost']} CP) — "
+                            f"{BUILDINGS[b]['effect']}"
+                        ),
+                    )
+
+                cost = {
+                    "⚔️ Атаковать": COST_ATTACK,
+                    "🛡️ Укрепить / Починить": COST_FORTIFY,
+                }.get(mode, BUILDINGS[building]["cost"] if building else 0)
+                label = {
+                    "⚔️ Атаковать": f"⚔️ Атаковать (-{COST_ATTACK} CP)",
+                    "🛡️ Укрепить / Починить":
+                        f"🛡️ Укрепить / Починить (-{COST_FORTIFY} CP)",
+                }.get(mode, f"🏗️ Построить (-{cost} CP)")
+
+                if st.button(label, type="primary", disabled=not conq_pin):
+                    action = {
+                        "⚔️ Атаковать": "attack",
+                        "🛡️ Укрепить / Починить": "fortify",
+                        "🏗️ Построить": "build",
+                    }[mode]
+
+                    if offline:
+                        res, err = demo_action(
+                            action, conq_manager, conq_tier,
+                            choice["id"], building,
+                        )
+                    else:
+                        payload = {
+                            "p_manager": conq_manager,
+                            "p_pin": conq_pin,
+                            "p_tile_id": int(choice["id"]),
+                        }
+                        if action == "build":
+                            payload["p_building"] = building
+                        res, err = conquest_rpc(f"conquest_{action}", payload)
+
+                    if err:
+                        st.error(err)
+                    elif res and res.get("captured"):
+                        st.success(
+                            f"Клетка ({choice['x']},{choice['y']}) захвачена! "
+                            f"Урон {res.get('damage')}."
+                        )
+                        st.rerun()
+                    else:
+                        detail = ""
+                        if res and res.get("damage"):
+                            detail = (
+                                f" Урон {res['damage']}, "
+                                f"осталось {res.get('hp')} HP."
+                            )
+                        st.success(f"Готово.{detail}")
+                        st.rerun()
+
+            if not conq_pin:
+                st.caption("Введи PIN, чтобы разблокировать действия.")
+
+        with st.expander("Как считается урон и что дают здания"):
+            st.markdown(
+                f"- Базовый урон атаки — **{BASE_DAMAGE}**, каждый "
+                f"🥊 Осадный зал дивизиона добавляет **+{SIEGE_BONUS}** "
+                f"(потолок {MAX_DAMAGE}).\n"
+                f"- 🛡️ Ремонт восстанавливает **{FORTIFY_HEAL} HP** за "
+                f"{COST_FORTIFY} CP.\n"
+                "- При захвате клетка достаётся с **50% прочности**, "
+                "а постройки прежнего владельца разрушаются.\n"
+                "- ⭐ Столицы имеют 200 HP, 🏆 Уэмбли — 300 HP.\n"
+                "- Соседство диагональное: от любой столицы до Уэмбли "
+                "ровно 4 шага."
+            )
+
 
 with tab_fame:
     record, champion, leaders = calculate_hall_of_fame(df)
