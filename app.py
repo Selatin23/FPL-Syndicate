@@ -29,9 +29,11 @@ TAB_CUPS = "🌍 Еврокубки"
 TAB_SQUID = "🦑 Squid Game"
 TAB_FAME = "🥇 Зал Славы"
 TAB_WALLET = "💰 Финансы"
+TAB_EXCHANGE = "📈 Биржа"
 
 TAB_LABELS = [
     TAB_LEAGUES, TAB_SOCIAL, TAB_CUPS, TAB_SQUID, TAB_FAME, TAB_WALLET,
+    TAB_EXCHANGE,
 ]
 
 # Человекочитаемые пути для GA4 (эмодзи в URL читать неудобно)
@@ -42,6 +44,7 @@ TAB_PATHS = {
     TAB_SQUID: "/squid-game",
     TAB_FAME: "/hall-of-fame",
     TAB_WALLET: "/finance",
+    TAB_EXCHANGE: "/exchange",
 }
 
 # ---------- Google Analytics 4 ----------
@@ -1326,6 +1329,138 @@ def sort_posts(posts: list[dict], mode: str, gw: int) -> list[dict]:
     return sorted(posts, key=created, reverse=True)  # ⏱️ Свежее
 
 
+# ---------- Модуль «Биржа» (FPL Exchange) ----------
+
+# element_type в FPL: 1 GK, 2 DEF, 3 MID, 4 FWD
+POSITION_NAMES = {1: "Вратари", 2: "Защитники", 3: "Полузащитники", 4: "Нападающие"}
+POSITION_SHORT = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+
+
+@st.cache_data(ttl=600)
+def fetch_exchange_data():
+    """Игроки + средний FDR на 3 ближайших тура из FPL API.
+
+    Возвращает (DataFrame, источник): источник — 'api' или 'demo'.
+    В DataFrame: web_name, team_name, pos, now_cost, total_points,
+    net_transfers, roi, fdr3.
+    """
+    try:
+        boot = requests.get(
+            f"{FPL_BASE_URL}/bootstrap-static/", timeout=12
+        )
+        boot.raise_for_status()
+        boot = boot.json()
+
+        fixtures = requests.get(
+            f"{FPL_BASE_URL}/fixtures/", params={"future": 1}, timeout=12
+        )
+        fixtures.raise_for_status()
+        fixtures = fixtures.json()
+
+        return _build_exchange(boot, fixtures), "api"
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        return _demo_exchange(), "demo"
+
+
+def _team_fdr3(fixtures: list[dict]) -> dict:
+    """Средний FDR по 3 ближайшим матчам для каждой команды.
+
+    В fixtures difficulty указан отдельно для хозяев и гостей:
+    team_h_difficulty относится к team_h, team_a_difficulty — к team_a.
+    """
+    from collections import defaultdict
+
+    by_team = defaultdict(list)
+    ordered = sorted(
+        fixtures,
+        key=lambda f: (f.get("event") is None, f.get("event") or 0,
+                       f.get("kickoff_time") or ""),
+    )
+    for f in ordered:
+        h, a = f.get("team_h"), f.get("team_a")
+        if h is not None:
+            by_team[h].append(f.get("team_h_difficulty"))
+        if a is not None:
+            by_team[a].append(f.get("team_a_difficulty"))
+
+    fdr = {}
+    for team_id, diffs in by_team.items():
+        vals = [d for d in diffs[:3] if d is not None]
+        if vals:
+            fdr[team_id] = round(sum(vals) / len(vals), 2)
+    return fdr
+
+
+def _build_exchange(boot: dict, fixtures: list[dict]) -> pd.DataFrame:
+    team_name = {t["id"]: t["name"] for t in boot["teams"]}
+    fdr3 = _team_fdr3(fixtures)
+
+    rows = []
+    for e in boot["elements"]:
+        cost = e["now_cost"] / 10  # цена приходит в десятых (55 -> 5.5)
+        pts = e["total_points"]
+        net = e["transfers_in_event"] - e["transfers_out_event"]
+        rows.append(
+            {
+                "web_name": e["web_name"],
+                "team_name": team_name.get(e["team"], "—"),
+                "team_id": e["team"],
+                "element_type": e["element_type"],
+                "pos": POSITION_SHORT.get(e["element_type"], "?"),
+                "now_cost": cost,
+                "total_points": pts,
+                "net_transfers": net,
+                "roi": round(pts / cost, 2) if cost else 0.0,
+                "fdr3": fdr3.get(e["team"]),
+            }
+        )
+    df = pd.DataFrame(rows)
+    return df
+
+
+def _demo_exchange() -> pd.DataFrame:
+    """Синтетические данные, когда FPL API недоступен (межсезонье/офлайн).
+
+    Форма правдоподобна: цены 4.0–14.0, очки коррелируют с ценой, FDR 2–5.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(2026)
+    teams = [
+        "Arsenal", "Aston Villa", "Bournemouth", "Brentford", "Brighton",
+        "Chelsea", "Crystal Palace", "Everton", "Fulham", "Ipswich",
+        "Leicester", "Liverpool", "Man City", "Man Utd", "Newcastle",
+        "Forest", "Southampton", "Spurs", "West Ham", "Wolves",
+    ]
+    names = [
+        "Saka", "Palmer", "Salah", "Haaland", "Watkins", "Isak", "Foden",
+        "Son", "Bruno", "Mbeumo", "Gordon", "Bowen", "Mateta", "Wood",
+        "Cunha", "Rogers", "Semenyo", "Gakpo", "Rice", "Trippier",
+    ]
+    team_fdr = {t: round(rng.uniform(2, 5), 2) for t in teams}
+    rows = []
+    for i in range(200):
+        et = int(rng.choice([1, 2, 3, 4], p=[0.1, 0.32, 0.4, 0.18]))
+        team = teams[i % len(teams)]
+        cost = round(float(rng.uniform(4.0, 14.0)), 1)
+        pts = int(max(0, rng.normal(cost * 12, 25)))
+        tin = int(rng.integers(0, 400_000))
+        tout = int(rng.integers(0, 400_000))
+        base = names[i % len(names)]
+        rows.append(
+            {
+                "web_name": base if i < len(names) else f"{base}{i}",
+                "team_name": team, "team_id": i % len(teams) + 1,
+                "element_type": et, "pos": POSITION_SHORT[et],
+                "now_cost": cost, "total_points": pts,
+                "net_transfers": tin - tout,
+                "roi": round(pts / cost, 2) if cost else 0.0,
+                "fdr3": team_fdr[team],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 # ---------- Выбор источника данных ----------
 
 if os.path.exists(LOGO_FILE):
@@ -1660,7 +1795,8 @@ METRICS_PER_ROW = 2 if compact else 4
 # ---------- Вывод: вкладки ----------
 
 (
-    tab_leagues, tab_social, tab_cups, tab_squid, tab_fame, tab_wallet
+    tab_leagues, tab_social, tab_cups, tab_squid, tab_fame, tab_wallet,
+    tab_exchange,
 ) = st.tabs(TAB_LABELS)
 
 with tab_leagues:
@@ -2200,6 +2336,139 @@ with tab_social:
                 if like_post(post_id, likes):
                     st.session_state["liked_posts"].add(post_id)
                     st.rerun()
+
+
+with tab_exchange:
+    st.header("📈 FPL Exchange")
+    st.caption(
+        "Игроки как активы: форма, спрос рынка (нетто-трансферы), отдача на "
+        "цену (ROI) и сложность ближайших матчей (FDR). Данные — из FPL API."
+    )
+
+    exch_df, exch_src = fetch_exchange_data()
+
+    if exch_src == "demo":
+        st.warning(
+            "⚠️ FPL API недоступен (межсезонье или нет соединения) — показаны "
+            "демонстрационные данные. В сезоне здесь будут реальные игроки."
+        )
+
+    if exch_df.empty:
+        st.info("Нет данных для отображения.")
+    else:
+        # --- Market Movers ---
+        st.subheader("Market Movers")
+        movers_in = exch_df.nlargest(3, "net_transfers")
+        movers_out = exch_df.nsmallest(3, "net_transfers")
+
+        st.markdown("**🟢 Лидеры закупок (нетто-трансферы за тур)**")
+        metric_grid(
+            [
+                (
+                    f"{r['web_name']} ({r['pos']})",
+                    f"+{int(r['net_transfers']):,}".replace(",", " "),
+                    f"{r['team_name']} · {r['now_cost']}m",
+                )
+                for _, r in movers_in.iterrows()
+            ],
+            min(3, METRICS_PER_ROW),
+        )
+
+        st.markdown("**🔴 Лидеры продаж**")
+        metric_grid(
+            [
+                (
+                    f"{r['web_name']} ({r['pos']})",
+                    f"{int(r['net_transfers']):,}".replace(",", " "),
+                    f"{r['team_name']} · {r['now_cost']}m",
+                )
+                for _, r in movers_out.iterrows()
+            ],
+            min(3, METRICS_PER_ROW),
+        )
+
+        # --- Скринер ---
+        st.subheader("Скринер")
+
+        positions = st.multiselect(
+            "Позиции",
+            options=list(POSITION_NAMES.values()),
+            default=list(POSITION_NAMES.values()),
+        )
+        sel_types = [k for k, v in POSITION_NAMES.items() if v in positions]
+
+        pmin = float(exch_df["now_cost"].min())
+        pmax = float(exch_df["now_cost"].max())
+        price_range = st.slider(
+            "Диапазон цены, m",
+            min_value=round(pmin, 1),
+            max_value=round(pmax, 1),
+            value=(round(pmin, 1), round(pmax, 1)),
+            step=0.1,
+        )
+
+        max_fdr = st.slider(
+            "Максимальный FDR (меньше — легче календарь)",
+            min_value=2.0, max_value=5.0, value=5.0, step=0.1,
+        )
+
+        screened = exch_df[
+            exch_df["element_type"].isin(sel_types)
+            & exch_df["now_cost"].between(price_range[0], price_range[1])
+        ].copy()
+        # FDR может отсутствовать (нет будущих матчей) — такие не режем фильтром
+        screened = screened[
+            screened["fdr3"].isna() | (screened["fdr3"] <= max_fdr)
+        ]
+        screened = screened.sort_values(
+            ["roi", "total_points"], ascending=[False, False]
+        )
+
+        st.caption(f"Найдено активов: {len(screened)}")
+
+        view = pd.DataFrame(
+            {
+                "Игрок": screened["web_name"].values,
+                "Клуб": screened["team_name"].values,
+                "Поз": screened["pos"].values,
+                "Цена": screened["now_cost"].values,
+                "Очки": screened["total_points"].values,
+                "Net Transfers": screened["net_transfers"].values,
+                "ROI": screened["roi"].values,
+                "FDR (Next 3 GW)": screened["fdr3"].values,
+            }
+        )
+
+        max_roi = max(float(view["ROI"].max()) if len(view) else 1.0, 0.1)
+        exch_config = {
+            "Игрок": st.column_config.TextColumn("Игрок", width="medium"),
+            "Клуб": st.column_config.TextColumn("Клуб", width="small"),
+            "Поз": st.column_config.TextColumn("Поз", width="small"),
+            "Цена": st.column_config.NumberColumn("Цена", format="%.1fm"),
+            "Очки": st.column_config.NumberColumn("Очки", format="%d"),
+            "Net Transfers": st.column_config.NumberColumn(
+                "Net Transfers", format="%+d",
+                help="Нетто-трансферы за тур: закупки минус продажи",
+            ),
+            "ROI": st.column_config.ProgressColumn(
+                "ROI", help="Очки на 1m цены", format="%.2f",
+                min_value=0, max_value=max_roi,
+            ),
+            "FDR (Next 3 GW)": st.column_config.NumberColumn(
+                "FDR (Next 3 GW)", format="%.2f",
+                help="Средняя сложность 3 ближайших матчей — меньше лучше",
+            ),
+        }
+
+        if compact:
+            drop = ["Клуб", "Очки"]
+            view = view.drop(columns=drop)
+            exch_config = {k: v for k, v in exch_config.items() if k not in drop}
+
+        st.dataframe(
+            view, column_config=exch_config,
+            hide_index=True, use_container_width=True,
+        )
 
 
 st.markdown(
