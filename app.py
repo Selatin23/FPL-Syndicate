@@ -24,6 +24,7 @@ st.set_page_config(
 # ---------- Порядок вкладок ----------
 
 TAB_LEAGUES = "🏆 Лиги"
+TAB_CABINET = "💼 Мой кабинет"
 TAB_SOCIAL = "💬 Сообщество"
 TAB_CUPS = "🌍 Еврокубки"
 TAB_SQUID = "🦑 Squid Game"
@@ -32,13 +33,14 @@ TAB_WALLET = "💰 Финансы"
 TAB_EXCHANGE = "📈 Биржа"
 
 TAB_LABELS = [
-    TAB_LEAGUES, TAB_SOCIAL, TAB_CUPS, TAB_SQUID, TAB_FAME, TAB_WALLET,
-    TAB_EXCHANGE,
+    TAB_LEAGUES, TAB_CABINET, TAB_SOCIAL, TAB_CUPS, TAB_SQUID, TAB_FAME,
+    TAB_WALLET, TAB_EXCHANGE,
 ]
 
 # Человекочитаемые пути для GA4 (эмодзи в URL читать неудобно)
 TAB_PATHS = {
     TAB_LEAGUES: "/leagues",
+    TAB_CABINET: "/dashboard",
     TAB_SOCIAL: "/community",
     TAB_CUPS: "/eurocups",
     TAB_SQUID: "/squid-game",
@@ -279,6 +281,26 @@ st.markdown(
         word-break: break-word;
         margin: 0.25rem 0 0.15rem 0;
     }
+
+    /* Кабинет менеджера — строгий брокерский стиль */
+    .dash-card {
+        border: 1px solid rgba(128, 128, 128, 0.28);
+        border-radius: 10px;
+        padding: 0.7rem 0.9rem;
+        background: rgba(128, 128, 128, 0.05);
+    }
+    .dash-vs {
+        border: 1px solid rgba(0, 223, 122, 0.4);
+        border-radius: 10px;
+        padding: 0.7rem 0.9rem;
+        background: rgba(0, 223, 122, 0.06);
+        font-weight: 700;
+        font-size: 1.05rem;
+        margin: 0.3rem 0 0.6rem 0;
+    }
+    .dash-diff { font-size: 0.88rem; line-height: 1.7; }
+    .dash-diff-me { color: #16A34A; }
+    .dash-diff-opp { color: #DC2626; }
 
     /* Футер */
     .fpl-footer {
@@ -881,32 +903,39 @@ def fetch_h2h_matches(league_id: int) -> pd.DataFrame:
     """
     rows = []
     page = 1
-    while page <= 50:  # предохранитель от бесконечного цикла
-        resp = requests.get(
-            f"{FPL_BASE_URL}/leagues-h2h-matches/league/{league_id}/",
-            params={"page": page},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        for m in data.get("results", []):
-            # Пропускаем "выходные" и матчи против среднего по лиге
-            if m.get("is_bye"):
-                continue
-            if m.get("entry_1_entry") is None or m.get("entry_2_entry") is None:
-                continue
-            rows.append(
-                {
-                    "event": m.get("event"),
-                    "entry_1": int(m["entry_1_entry"]),
-                    "pts_1": m.get("entry_1_points", 0),
-                    "entry_2": int(m["entry_2_entry"]),
-                    "pts_2": m.get("entry_2_points", 0),
-                }
+    try:
+        while page <= 50:  # предохранитель от бесконечного цикла
+            resp = requests.get(
+                f"{FPL_BASE_URL}/leagues-h2h-matches/league/{league_id}/",
+                params={"page": page},
+                timeout=15,
             )
-        if not data.get("has_next"):
-            break
-        page += 1
+            resp.raise_for_status()
+            data = resp.json()
+            for m in data.get("results", []):
+                # Пропускаем "выходные" и матчи против среднего по лиге
+                if m.get("is_bye"):
+                    continue
+                if m.get("entry_1_entry") is None or m.get("entry_2_entry") is None:
+                    continue
+                rows.append(
+                    {
+                        "event": m.get("event"),
+                        "entry_1": int(m["entry_1_entry"]),
+                        "pts_1": m.get("entry_1_points", 0),
+                        "entry_2": int(m["entry_2_entry"]),
+                        "pts_2": m.get("entry_2_points", 0),
+                    }
+                )
+            if not data.get("has_next"):
+                break
+            page += 1
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        # Недоступная/закрытая/несуществующая лига — пустой результат,
+        # вызывающий код откатится на сгенерированный календарь.
+        return pd.DataFrame(
+            columns=["event", "entry_1", "pts_1", "entry_2", "pts_2"]
+        )
 
     return pd.DataFrame(
         rows, columns=["event", "entry_1", "pts_1", "entry_2", "pts_2"]
@@ -1461,6 +1490,147 @@ def _demo_exchange() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ---------- Модуль «Мой кабинет» (Manager Dashboard) ----------
+
+POSITION_LONG = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+
+
+@st.cache_data(ttl=300)
+def fetch_fpl_bootstrap():
+    """bootstrap-static один раз: игроки, позиции, текущий тур. None при сбое."""
+    try:
+        resp = requests.get(f"{FPL_BASE_URL}/bootstrap-static/", timeout=12)
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.exceptions.RequestException, ValueError):
+        return None
+
+
+@st.cache_data(ttl=300)
+def fetch_manager_summary(team_id: int) -> dict | None:
+    """Банк, стоимость команды, свободные трансферы и последний состав.
+
+    Собирает из entry/{id}/, entry/{id}/history/ и entry/{id}/event/{gw}/picks/.
+    Возвращает None, если API недоступен.
+    """
+    try:
+        entry = requests.get(
+            f"{FPL_BASE_URL}/entry/{team_id}/", timeout=10
+        )
+        entry.raise_for_status()
+        entry = entry.json()
+
+        hist = requests.get(
+            f"{FPL_BASE_URL}/entry/{team_id}/history/", timeout=10
+        )
+        hist.raise_for_status()
+        current = hist.json().get("current", [])
+
+        gw = entry.get("current_event")
+        bank = None
+        squad = []
+        if gw:
+            picks = requests.get(
+                f"{FPL_BASE_URL}/entry/{team_id}/event/{gw}/picks/",
+                timeout=10,
+            )
+            if picks.ok:
+                pj = picks.json()
+                bank = pj.get("entry_history", {}).get("bank")
+                squad = [p["element"] for p in pj.get("picks", [])]
+
+        # Свободные трансферы FPL напрямую не отдаёт — оцениваем по истории:
+        # +1 за тур, но не больше 5, минус сделанные трансферы прошлого тура.
+        free_transfers = None
+        if current:
+            last = current[-1]
+            # эвристика: если в прошлом туре не было трансферов — накопился 2-й
+            made = last.get("event_transfers", 0)
+            free_transfers = 1 if made > 0 else 2
+            if bank is None:
+                bank = last.get("bank")
+
+        return {
+            "team_id": team_id,
+            "manager": (
+                f"{entry.get('player_first_name', '')} "
+                f"{entry.get('player_last_name', '')}"
+            ).strip(),
+            "team_name": entry.get("name", f"Team {team_id}"),
+            "gw": gw,
+            "bank": (bank / 10) if bank is not None else None,
+            "free_transfers": free_transfers,
+            "squad": squad,
+            "overall_rank": entry.get("summary_overall_rank"),
+        }
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        return None
+
+
+def player_lookup(boot: dict) -> dict:
+    """{element_id: {name, pos, team, news, chance}}."""
+    if not boot:
+        return {}
+    out = {}
+    for e in boot["elements"]:
+        out[e["id"]] = {
+            "name": e["web_name"],
+            "pos": POSITION_LONG.get(e["element_type"], "?"),
+            "team": e["team"],
+            "news": e.get("news") or "",
+            "chance": e.get("chance_of_playing_this_round"),
+        }
+    return out
+
+
+def squad_alerts(squad: list[int], players: dict) -> list[str]:
+    """Игроки состава с травмой/дисквалификацией или новостью."""
+    alerts = []
+    for pid in squad:
+        p = players.get(pid)
+        if not p:
+            continue
+        chance = p["chance"]
+        flagged = (chance is not None and chance < 100) or p["news"]
+        if flagged:
+            tag = f"{p['name']} ({p['pos']})"
+            if chance is not None and chance < 100:
+                tag += f" — {chance}% на выход"
+            if p["news"]:
+                tag += f": {p['news']}"
+            alerts.append(tag)
+    return alerts
+
+
+def next_h2h_opponent(league_id: int, team_id: int, next_gw: int):
+    """Соперник по H2H-лиге на предстоящий тур. (team_id соперника, имя) | None."""
+    matches = fetch_h2h_matches(league_id)
+    if matches.empty:
+        return None
+    upcoming = matches[matches["event"] == next_gw]
+    for row in upcoming.itertuples():
+        if row.entry_1 == team_id:
+            return row.entry_2
+        if row.entry_2 == team_id:
+            return row.entry_1
+    return None
+
+
+def squad_diff(my_squad: list[int], opp_squad: list[int], players: dict):
+    """(мои дифференциалы, дифференциалы соперника) как списки 'Имя (POS)'."""
+    def fmt(ids):
+        out = []
+        for pid in ids:
+            p = players.get(pid)
+            if p:
+                out.append(f"{p['name']} ({p['pos']})")
+        return out
+
+    mine = [p for p in my_squad if p not in set(opp_squad)]
+    theirs = [p for p in opp_squad if p not in set(my_squad)]
+    return fmt(mine), fmt(theirs)
+
+
 # ---------- Выбор источника данных ----------
 
 if os.path.exists(LOGO_FILE):
@@ -1499,11 +1669,12 @@ if data_source == "Данные сезона 2025 (Excel)":
 
     # Статусы взносов подтягиваем из админ-таблицы; её недоступность не критична
     try:
-        _, _, payment_map, _, pin_map, manager_team_map = load_admin_sheet(
-            CSV_URL
-        )
+        (
+            _, _, payment_map, league_id_map, pin_map, manager_team_map,
+        ) = load_admin_sheet(CSV_URL)
     except Exception:
         payment_map, pin_map, manager_team_map = {}, {}, {}
+        league_id_map = {}
     # Реальные H2H-матчи относятся к текущему сезону, а в Excel — прошлый,
     # поэтому здесь всегда используем сгенерированный календарь.
     h2h_matches_by_tier = {}
@@ -1795,8 +1966,8 @@ METRICS_PER_ROW = 2 if compact else 4
 # ---------- Вывод: вкладки ----------
 
 (
-    tab_leagues, tab_social, tab_cups, tab_squid, tab_fame, tab_wallet,
-    tab_exchange,
+    tab_leagues, tab_cabinet, tab_social, tab_cups, tab_squid, tab_fame,
+    tab_wallet, tab_exchange,
 ) = st.tabs(TAB_LABELS)
 
 with tab_leagues:
@@ -1853,6 +2024,148 @@ with tab_leagues:
             if not table.empty:
                 st.subheader(league_name)
                 render_league_table(table, league_name)
+
+with tab_cabinet:
+    st.header("💼 Мой кабинет")
+
+    if not is_logged_in:
+        st.warning(
+            "Авторизуйтесь в боковом меню слева, чтобы открыть личный кабинет."
+        )
+    else:
+        my_team_id = manager_team_map.get(current_user)
+        my_tier = st.session_state.get("current_tier")
+        boot = fetch_fpl_bootstrap()
+        players = player_lookup(boot)
+
+        # Текущий/предстоящий тур
+        cur_gw = None
+        if boot:
+            for e in boot.get("events", []):
+                if e.get("is_current"):
+                    cur_gw = e["id"]
+            if cur_gw is None:
+                nxt = next((e for e in boot.get("events", []) if e.get("is_next")), None)
+                cur_gw = (nxt["id"] - 1) if nxt else 0
+        next_gw = (cur_gw or 0) + 1
+
+        summary = fetch_manager_summary(my_team_id) if my_team_id else None
+
+        if summary is None:
+            st.info(
+                "Данные FPL API недоступны (межсезонье или нет соединения). "
+                "Личная статистика появится с началом сезона."
+            )
+
+        # === Блок 1: Радар команды ===
+        st.subheader("Радар команды")
+        rank = summary and summary.get("overall_rank")
+        bank = summary and summary.get("bank")
+        fts = summary and summary.get("free_transfers")
+        metric_grid(
+            [
+                (
+                    "Overall Rank",
+                    f"{rank:,}".replace(",", " ") if rank else "—",
+                    None,
+                ),
+                (
+                    "Банк",
+                    f"{bank:.1f}m" if bank is not None else "—",
+                    None,
+                ),
+                (
+                    "Свободные трансферы",
+                    str(fts) if fts is not None else "—",
+                    None,
+                ),
+            ],
+            min(3, METRICS_PER_ROW),
+        )
+
+        if summary and summary.get("squad"):
+            alerts = squad_alerts(summary["squad"], players)
+            if alerts:
+                st.error(
+                    "⚠️ Проблемные игроки в составе:\n\n- "
+                    + "\n- ".join(alerts)
+                )
+            else:
+                st.success("✅ Весь состав доступен — травм и дисквалификаций нет.")
+
+        # === Блок 2: H2H Скаутинг ===
+        st.subheader("H2H Скаутинг")
+
+        opp_id = None
+        league_id = league_id_map.get(my_tier) if my_tier else None
+        if league_id and my_team_id:
+            opp_id = next_h2h_opponent(league_id, my_team_id, next_gw)
+
+        if not league_id:
+            st.info(
+                "H2H-скаутинг недоступен: для дивизиона не задан League_ID "
+                "в админ-таблице."
+            )
+        elif opp_id is None:
+            st.info(f"Соперник на GW{next_gw} ещё не определён календарём лиги.")
+        else:
+            opp = fetch_manager_summary(opp_id)
+            opp_name = opp["manager"] if opp else f"Team {opp_id}"
+            st.markdown(
+                f'<div class="dash-vs">⚔️ Твой соперник в GW{next_gw}: '
+                f"{opp_name}</div>",
+                unsafe_allow_html=True,
+            )
+
+            if opp:
+                o1, o2 = st.columns(2)
+                o1.metric(
+                    "Банк соперника",
+                    f"{opp['bank']:.1f}m" if opp.get("bank") is not None else "—",
+                )
+                o2.metric(
+                    "Трансферы соперника",
+                    str(opp["free_transfers"])
+                    if opp.get("free_transfers") is not None else "—",
+                )
+
+                # Дифференциалы составов
+                if summary and summary.get("squad") and opp.get("squad"):
+                    mine, theirs = squad_diff(
+                        summary["squad"], opp["squad"], players
+                    )
+                    d1, d2 = st.columns(2)
+                    with d1:
+                        st.markdown("**✅ Мои угрозы**")
+                        st.caption("Игроки, которых нет у соперника")
+                        st.markdown(
+                            '<div class="dash-diff dash-diff-me">'
+                            + ("<br>".join(mine) if mine else "—")
+                            + "</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with d2:
+                        st.markdown("**⚠️ Опасность**")
+                        st.caption("Игроки соперника, которых нет у меня")
+                        st.markdown(
+                            '<div class="dash-diff dash-diff-opp">'
+                            + ("<br>".join(theirs) if theirs else "—")
+                            + "</div>",
+                            unsafe_allow_html=True,
+                        )
+
+        # === Блок 3: AI-Аналитика ===
+        st.subheader("AI-Аналитика")
+        st.info(
+            "🤖 **Мнение AI-ассистента**\n\n"
+            "У твоего соперника скопилось 2 трансфера и много денег в банке — "
+            "ожидай покупку премиум-нападающего. Твои дифференциалы в "
+            "полузащите могут решить исход матча!"
+        )
+        st.caption(
+            "Пока это статичный плейсхолдер. Позже сюда можно подключить "
+            "разбор от Claude на основе реальных данных соперника."
+        )
 
 with tab_cups:
     mode, payload = calculate_european_cups(df, current_gw)
