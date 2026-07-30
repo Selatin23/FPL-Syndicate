@@ -1329,15 +1329,32 @@ def encode_image(uploaded_file) -> tuple[str | None, str | None]:
 
 
 def render_post_image(image_ref: str):
-    """Показывает картинку поста: data URL или обычная ссылка."""
+    """Показывает картинку поста в компактном виде, не растягивая на всю ширину.
+
+    На широком экране изображение занимает левую часть карточки (≈2/3),
+    на телефоне компактный режим отдаёт ему всю доступную ширину.
+    """
     if not image_ref:
         return
     try:
-        if image_ref.startswith("data:"):
-            payload = image_ref.split(",", 1)[1]
-            st.image(base64.b64decode(payload), use_container_width=True)
+        data = (
+            base64.b64decode(image_ref.split(",", 1)[1])
+            if image_ref.startswith("data:")
+            else image_ref
+        )
+    except Exception:
+        st.caption("🖼️ Картинку не удалось отобразить.")
+        return
+
+    try:
+        if compact:
+            # Телефон: узкий экран, полная ширина карточки уместна
+            st.image(data, use_container_width=True)
         else:
-            st.image(image_ref, use_container_width=True)
+            # Десктоп: ограничиваем колонкой, чтобы картинка не разъезжалась
+            img_col, _ = st.columns([2, 1])
+            with img_col:
+                st.image(data, use_container_width=True)
     except Exception:
         st.caption("🖼️ Картинку не удалось отобразить.")
 
