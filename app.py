@@ -349,13 +349,13 @@ def render_banner(status_chip: str):
         f"""
         <div class="fpl-banner">
             <h1>⚽ FPL Syndicate {SEASON_LABEL}</h1>
-            <p>Единый аналитический хаб 160 участников: Head-to-Head лиги,
+            <p>Единый аналитический хаб 180 участников: Head-to-Head лиги,
             Еврокубки, цикличная «Игра в Кальмара» и прозрачный Финансовый Хаб
-            с призовым фондом 1 600 000 ₸.</p>
+            с призовым фондом 1 800 000 ₸.</p>
             <div class="fpl-chips">
                 <span class="fpl-chip">Статус: {status_chip}</span>
                 <span class="fpl-chip">Сезон: {SEASON_LABEL}</span>
-                <span class="fpl-chip">Призовой фонд: 1 600 000 ₸</span>
+                <span class="fpl-chip">Призовой фонд: 1 800 000 ₸</span>
             </div>
         </div>
         """,
@@ -368,7 +368,9 @@ EXCEL_FILE = "Teams_2025.xlsx"
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
 
 # Все лиги турнира в иерархическом порядке — выводятся по мере наполнения
-ALL_LEAGUES = ["Premier League", "A-1", "A-2", "B-1", "B-2", "B-3", "C", "D"]
+ALL_LEAGUES = [
+    "Premier League", "A-1", "A-2", "B-1", "B-2", "B-3", "C-1", "C-2", "D",
+]
 
 # Маппинг названий лиг из Excel в наш единый стандарт league_tier
 LEAGUE_NAME_MAP = {
@@ -378,7 +380,8 @@ LEAGUE_NAME_MAP = {
     "H2H League B-1": "B-1",
     "H2H League B-2": "B-2",
     "H2H League B-3": "B-3",
-    "H2H League C": "C",
+    "H2H League C-1": "C-1",
+    "H2H League C-2": "C-2",
     "H2H League D": "D",
 }
 
@@ -409,24 +412,24 @@ ELIMINATION_GWS = [25, 30, 35]  # контрольные точки отсева
 ELIMINATED_PER_ROUND = 20       # сколько команд выбывает на каждой точке
 FINAL_START_GW, FINAL_END_GW = 36, 38
 
-# ---------- Призовая сетка сезона (итого 1 600 000 ₸) ----------
+# ---------- Призовая сетка сезона (итого 1 800 000 ₸) ----------
 
-PRIZE_FUND_TOTAL = 1_600_000
+PRIZE_FUND_TOTAL = 1_800_000
 
-# Лиги H2H: в каждой из 8 лиг
-PRIZE_LEAGUE = {1: 100_000, 2: 40_000, 3: 10_000}          # 8 x 150 000 = 1 200 000
+# Лиги H2H: в каждой из 9 лиг
+PRIZE_LEAGUE = {1: 100_000, 2: 40_000, 3: 10_000}          # 9 x 150 000 = 1 350 000
 
-# Общий зачёт среди всех 160 команд
+# Общий зачёт среди всех участников
 PRIZE_ABSOLUTE = {1: 40_000, 2: 20_000, 3: 10_000}         # 70 000
 
-# Еврокубки и Кубок (в сумме 150 000, чтобы фонд сошёлся к 1.6 млн)
+# Еврокубки и Кубок (в сумме 150 000, чтобы фонд сошёлся к 1.8 млн)
 PRIZE_CL_WINNER = 70_000       # Лига Чемпионов
 PRIZE_CONF_WINNER = 40_000     # Лига Конференций
 PRIZE_CUP_WINNER = 40_000      # Кубок
 
 # Специальные номинации
 PRIZE_SQUID_TOTAL = 57_000     # Squid Game: 1 500 x 38 туров
-PRIZE_MOM_TOTAL = 50_000       # Лучший TM месяца: 5 000 x 10 месяцев
+PRIZE_MOM_TOTAL = 100_000      # Лучший TM месяца: 10 000 x 10 месяцев
 PRIZE_MAX_PTS = 20_000         # Рекорд очков за тур
 PRIZE_BEST_CAP = 20_000        # Лучший капитан/вице
 PRIZE_EXPENSIVE_TEAM = 20_000  # Самая дорогая команда
@@ -1170,15 +1173,15 @@ PRIZE_PENDING = [
 
 
 def prize_fund_summary() -> pd.DataFrame:
-    """Сводка призового фонда для проверки, что всё сходится к 1.6 млн."""
+    """Сводка призового фонда для проверки, что всё сходится к 1.8 млн."""
     rows = [
-        ("Лиги H2H (8 лиг: 100/40/10 тыс.)", 8 * sum(PRIZE_LEAGUE.values())),
+        ("Лиги H2H (9 лиг: 100/40/10 тыс.)", 9 * sum(PRIZE_LEAGUE.values())),
         ("Общий зачёт (40/20/10 тыс.)", sum(PRIZE_ABSOLUTE.values())),
         ("Лига Чемпионов", PRIZE_CL_WINNER),
         ("Лига Конференций", PRIZE_CONF_WINNER),
         ("Кубок", PRIZE_CUP_WINNER),
         ("Squid Game (1 500 x 38)", PRIZE_SQUID_TOTAL),
-        ("Лучший TM месяца (5 000 x 10)", PRIZE_MOM_TOTAL),
+        ("Лучший TM месяца (10 000 x 10)", PRIZE_MOM_TOTAL),
         ("Max pts (рекорд тура)", PRIZE_MAX_PTS),
         ("Best cap & vc", PRIZE_BEST_CAP),
         ("Самая дорогая команда", PRIZE_EXPENSIVE_TEAM),
@@ -1289,7 +1292,7 @@ def insert_post(post: dict) -> bool:
 
 
 def like_post(post_id: str, current_likes: int) -> bool:
-    """Инкремент лайка (read-modify-write — для лиги на 160 человек достаточно)."""
+    """Инкремент лайка (read-modify-write — для сообщества такого размера хватает)."""
     url, key = supabase_config()
     if not url:
         for p in st.session_state.get("demo_posts", []):
@@ -1657,13 +1660,14 @@ st.sidebar.markdown(
 )
 st.sidebar.divider()
 
-st.sidebar.header("Источник данных")
+st.sidebar.header("Сезон")
 data_source = st.sidebar.radio(
-    "Откуда брать данные:",
-    ("Данные сезона 2025 (Excel)", "Использовать API FPL"),
+    "Выберите сезон:",
+    ("Сезон 2025-2026", "Сезон 2026-2027"),
+    index=1,
 )
 
-if data_source == "Данные сезона 2025 (Excel)":
+if data_source == "Сезон 2025-2026":
     try:
         df = load_mock_data(EXCEL_FILE)
     except FileNotFoundError:
@@ -1757,7 +1761,7 @@ current_gw = st.sidebar.slider(
 )
 
 # Статус сезона: из API в онлайн-режиме, иначе по выбранному туру
-api_mode = data_source != "Данные сезона 2025 (Excel)"
+api_mode = data_source != "Сезон 2025-2026"
 current_event = fetch_current_event() if api_mode else None
 render_banner(season_status_chip(current_event, current_gw))
 
