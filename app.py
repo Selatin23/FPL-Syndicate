@@ -1887,11 +1887,21 @@ def render_league_table(table: pd.DataFrame, tier: str):
     )
 
 
+RATING_COLUMNS = [
+    "Дивизион", "Команд", "Средний Total", "Медиана", "Лучший", "Худший",
+]
+
+
 def division_rating(data: pd.DataFrame) -> pd.DataFrame:
-    """Рейтинг дивизионов по среднему TOTAL участников."""
+    """Рейтинг дивизионов по среднему TOTAL участников.
+
+    До старта сезона очков ещё нет, а в API-режиме данных может не быть вовсе,
+    поэтому при отсутствии строк возвращаем пустой DataFrame с нужными
+    колонками — иначе sort_values падал бы с KeyError.
+    """
     rows = []
     for league in ALL_LEAGUES:
-        subset = data[data["league_tier"] == league]
+        subset = data[data["league_tier"] == league] if not data.empty else data
         if subset.empty:
             continue
         rows.append(
@@ -1904,8 +1914,12 @@ def division_rating(data: pd.DataFrame) -> pd.DataFrame:
                 "Худший": int(subset["total_pts"].min()),
             }
         )
+
+    if not rows:
+        return pd.DataFrame(columns=RATING_COLUMNS)
+
     rating = (
-        pd.DataFrame(rows)
+        pd.DataFrame(rows, columns=RATING_COLUMNS)
         .sort_values("Средний Total", ascending=False)
         .reset_index(drop=True)
     )
@@ -2012,14 +2026,19 @@ with tab_leagues:
     # --- Сводный рейтинг дивизионов ---
     with st.expander("📊 Рейтинг дивизионов по среднему TOTAL", expanded=False):
         rating = division_rating(df)
-        rating_cols = (
-            ["Дивизион", "Средний Total", "Лучший"]
-            if compact
-            else ["Дивизион", "Команд", "Средний Total", "Медиана",
-                  "Лучший", "Худший"]
-        )
-        st.dataframe(rating[rating_cols], use_container_width=True)
-        if not rating.empty:
+        if rating.empty:
+            st.info(
+                "Рейтинг появится после первого сыгранного тура — "
+                "пока очков ни у кого нет."
+            )
+        else:
+            rating_cols = (
+                ["Дивизион", "Средний Total", "Лучший"]
+                if compact
+                else ["Дивизион", "Команд", "Средний Total", "Медиана",
+                      "Лучший", "Худший"]
+            )
+            st.dataframe(rating[rating_cols], use_container_width=True)
             st.caption(
                 f"Сильнейший дивизион: {rating.iloc[0]['Дивизион']} "
                 f"(средний Total {rating.iloc[0]['Средний Total']})."
@@ -2217,6 +2236,19 @@ with tab_cups:
         st.dataframe(qual_table, use_container_width=True)
     else:
         cl_df, conf_df = payload
+
+        # Числа берём из фактического размера сетки, чтобы текст не устаревал
+        # при изменении числа лиг или константы отсева.
+        _cl_total = len(cl_df)
+        _finalists = max(_cl_total - ELIMINATED_PER_ROUND * len(ELIMINATION_GWS),
+                         ELIMINATED_PER_ROUND)
+        st.caption(
+            f"Плей-офф: стартуют {_cl_total} команд в каждом турнире. "
+            f"На GW{', GW'.join(str(g) for g in ELIMINATION_GWS)} выбывает "
+            f"по {ELIMINATED_PER_ROUND} команд с худшей суммой за 5-туровый "
+            f"отрезок. Финал среди {_finalists} — побеждает лучшая сумма за "
+            f"GW{FINAL_START_GW}–{FINAL_END_GW}."
+        )
 
         if compact:
             # На телефоне показываем только очки текущей фазы
