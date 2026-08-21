@@ -1032,12 +1032,28 @@ def calculate_h2h_table(
 # ---------- Модуль «Зал Славы» ----------
 
 def calculate_hall_of_fame(df: pd.DataFrame):
-    """Рекорды сезона: лучший тур, чемпион по тоталу, топ по среднему баллу."""
+    """Рекорды сезона: лучший тур, чемпион по тоталу, топ по среднему баллу.
+
+    До старта сезона очков ещё нет (нет GW-колонок или таблица пуста),
+    поэтому record/champion могут быть None, а leaders — пустым DataFrame.
+    Вызывающий код обязан это проверять.
+    """
     cols = get_gw_cols(df)
+    leaders_cols = [
+        "Менеджер", "Команда", "Лига", "Total",
+        "Средний балл", "Лучший тур", "Разброс (σ)",
+    ]
+    if df.empty or not cols:
+        return None, None, pd.DataFrame(columns=leaders_cols)
+
     pts = df[cols]
 
     # Абсолютный рекорд очков за один тур
     best_per_team = pts.max(axis=1)
+    if best_per_team.isna().all():
+        # Все туры пустые — сезон ещё не стартовал
+        return None, None, pd.DataFrame(columns=leaders_cols)
+
     record_idx = best_per_team.idxmax()
     record_gw_col = pts.loc[record_idx].idxmax()
     record = {
@@ -1066,7 +1082,7 @@ def calculate_hall_of_fame(df: pd.DataFrame):
             "Лига": df["league_tier"],
             "Total": totals,
             "Средний балл": pts.mean(axis=1).round(2),
-            "Лучший тур": best_per_team.astype(int),
+            "Лучший тур": best_per_team.fillna(0).astype(int),
             "Разброс (σ)": pts.std(axis=1).round(2),
         }
     ).sort_values("Средний балл", ascending=False).reset_index(drop=True)
@@ -1146,16 +1162,17 @@ def calculate_prizes(df: pd.DataFrame, current_gw: int) -> dict:
 
     # 5. Рекорд очков за один тур
     record, _, _ = calculate_hall_of_fame(df)
-    record_idx = df[
-        (df["manager_name"] == record["manager"])
-        & (df["team_name"] == record["team"])
-    ].index
-    if len(record_idx):
-        award(
-            record_idx[0],
-            f"Max pts — рекорд тура ({record['points']} в GW{record['gw']})",
-            PRIZE_MAX_PTS,
-        )
+    if record is not None:
+        record_idx = df[
+            (df["manager_name"] == record["manager"])
+            & (df["team_name"] == record["team"])
+        ].index
+        if len(record_idx):
+            award(
+                record_idx[0],
+                f"Max pts — рекорд тура ({record['points']} в GW{record['gw']})",
+                PRIZE_MAX_PTS,
+            )
 
     return payouts
 
@@ -2412,35 +2429,41 @@ with tab_fame:
 
     st.header("🥇 Зал Славы — рекорды сезона")
 
-    metric_grid(
-        [
-            (
-                "🔥 Рекорд одного тура",
-                f"{record['points']} очков",
-                f"GW{record['gw']} — {record['manager']}",
-            ),
-            (
-                "👑 Чемпион сезона (Total)",
-                f"{champion['points']} очков",
-                f"{champion['manager']} ({champion['league']})",
-            ),
-            (
-                "📈 Лучший средний балл",
-                f"{leaders.iloc[0]['Средний балл']}",
-                f"{leaders.iloc[0]['Менеджер']} ({leaders.iloc[0]['Лига']})",
-            ),
-        ],
-        min(METRICS_PER_ROW, 3),
-    )
+    if record is None or leaders.empty:
+        st.info(
+            "Рекорды появятся после первого сыгранного тура — "
+            "пока статистики нет."
+        )
+    else:
+        metric_grid(
+            [
+                (
+                    "🔥 Рекорд одного тура",
+                    f"{record['points']} очков",
+                    f"GW{record['gw']} — {record['manager']}",
+                ),
+                (
+                    "👑 Чемпион сезона (Total)",
+                    f"{champion['points']} очков",
+                    f"{champion['manager']} ({champion['league']})",
+                ),
+                (
+                    "📈 Лучший средний балл",
+                    f"{leaders.iloc[0]['Средний балл']}",
+                    f"{leaders.iloc[0]['Менеджер']} ({leaders.iloc[0]['Лига']})",
+                ),
+            ],
+            min(METRICS_PER_ROW, 3),
+        )
 
-    st.subheader("Таблица лидеров (по среднему баллу)")
-    leaders_cols = (
-        ["Менеджер", "Total", "Средний балл"]
-        if compact
-        else ["Менеджер", "Команда", "Лига", "Total", "Средний балл",
-              "Лучший тур", "Разброс (σ)"]
-    )
-    st.dataframe(leaders[leaders_cols].head(15), use_container_width=True)
+        st.subheader("Таблица лидеров (по среднему баллу)")
+        leaders_cols = (
+            ["Менеджер", "Total", "Средний балл"]
+            if compact
+            else ["Менеджер", "Команда", "Лига", "Total", "Средний балл",
+                  "Лучший тур", "Разброс (σ)"]
+        )
+        st.dataframe(leaders[leaders_cols].head(15), use_container_width=True)
 
 with tab_wallet:
     st.header("💰 Финансовый Хаб")
