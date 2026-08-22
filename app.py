@@ -1,7 +1,9 @@
 import base64
+import concurrent.futures
 import json
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -625,20 +627,57 @@ def fetch_current_event():
     return 0  # ни один тур не начался — межсезонье
 
 
+# Больше воркеров = быстрее, но выше риск, что FPL забанит по IP.
+FPL_MAX_WORKERS = 15
+
+_fpl_thread_local = threading.local()
+
+
+def _fpl_session() -> requests.Session:
+    """Отдельная HTTP-сессия на каждый поток.
+
+    requests.Session не потокобезопасен, поэтому одну общую сессию делить
+    между воркерами нельзя. Зато сессия внутри потока переиспользует
+    TCP-соединение (keep-alive), что само по себе заметно ускоряет серию
+    запросов к одному хосту.
+    """
+    session = getattr(_fpl_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=FPL_MAX_WORKERS,
+            pool_maxsize=FPL_MAX_WORKERS,
+        )
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _fpl_thread_local.session = session
+    return session
+
+
 @st.cache_data(ttl=600)  # кэш 10 минут, чтобы не дёргать API на каждый rerun
 def fetch_fpl_data(team_ids: list[int], team_tier_map: dict) -> pd.DataFrame:
-    rows = []
-    errors = []
+    """Загружает данные всех команд из FPL API параллельно.
 
-    for team_id in team_ids:
+    Раньше запросы шли последовательно: 180 команд x 2 запроса = 360 обращений
+    друг за другом. Теперь их разбирает пул из FPL_MAX_WORKERS потоков.
+    """
+
+    def fetch_single_team(team_id):
+        """Данные одной команды. Возвращает (строка, ошибка) — ровно одно из двух.
+
+        Выполняется в рабочем потоке, поэтому здесь НЕЛЬЗЯ вызывать st.*:
+        у потока нет контекста Streamlit, вызов молча потеряется или упадёт.
+        Все сообщения показывает основной поток после сборки результатов.
+        """
+        session = _fpl_session()
         try:
-            entry_resp = requests.get(
+            entry_resp = session.get(
                 f"{FPL_BASE_URL}/entry/{team_id}/", timeout=10
             )
             entry_resp.raise_for_status()
             entry = entry_resp.json()
 
-            history_resp = requests.get(
+            history_resp = session.get(
                 f"{FPL_BASE_URL}/entry/{team_id}/history/", timeout=10
             )
             history_resp.raise_for_status()
@@ -658,25 +697,37 @@ def fetch_fpl_data(team_ids: list[int], team_tier_map: dict) -> pd.DataFrame:
                 if gw_entry.get("value") is not None:
                     team_value = gw_entry["value"] / 10
 
-            rows.append(
-                {
-                    "team_id": team_id,
-                    "manager_name": (
-                        f"{entry.get('player_first_name', '')} "
-                        f"{entry.get('player_last_name', '')}"
-                    ).strip(),
-                    "team_name": entry.get("name", f"Team {team_id}"),
-                    "league_tier": team_tier_map.get(
-                        team_id, "Premier League"
-                    ),
-                    **gw_points,
-                    "team_value": team_value,
-                }
-            )
+            row = {
+                "team_id": team_id,
+                "manager_name": (
+                    f"{entry.get('player_first_name', '')} "
+                    f"{entry.get('player_last_name', '')}"
+                ).strip(),
+                "team_name": entry.get("name", f"Team {team_id}"),
+                "league_tier": team_tier_map.get(team_id, "Premier League"),
+                **gw_points,
+                "team_value": team_value,
+            }
+            return row, None
         except requests.exceptions.RequestException as e:
-            errors.append(f"ID {team_id}: {e}")
+            return None, f"ID {team_id}: {e}"
         except (ValueError, KeyError) as e:
-            errors.append(f"ID {team_id}: неожиданный формат ответа ({e})")
+            return None, f"ID {team_id}: неожиданный формат ответа ({e})"
+
+    rows = []
+    errors = []
+
+    if team_ids:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=FPL_MAX_WORKERS
+        ) as executor:
+            # executor.map сохраняет порядок team_ids, поэтому таблица
+            # собирается детерминированно — важно для стабильных тай-брейков.
+            for row, error in executor.map(fetch_single_team, team_ids):
+                if error:
+                    errors.append(error)
+                else:
+                    rows.append(row)
 
     if errors:
         st.warning(
