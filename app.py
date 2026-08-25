@@ -25,6 +25,7 @@ st.set_page_config(
 
 # ---------- Порядок вкладок ----------
 
+TAB_STATUS = "📊 Статус"
 TAB_LEAGUES = "🏆 Лиги"
 TAB_CABINET = "💼 Мой кабинет"
 TAB_SOCIAL = "💬 Сообщество"
@@ -35,12 +36,13 @@ TAB_WALLET = "💰 Финансы"
 TAB_EXCHANGE = "📈 Биржа"
 
 TAB_LABELS = [
-    TAB_LEAGUES, TAB_CABINET, TAB_SOCIAL, TAB_CUPS, TAB_SQUID, TAB_FAME,
-    TAB_WALLET, TAB_EXCHANGE,
+    TAB_STATUS, TAB_LEAGUES, TAB_CABINET, TAB_SOCIAL, TAB_CUPS, TAB_SQUID,
+    TAB_FAME, TAB_WALLET, TAB_EXCHANGE,
 ]
 
 # Человекочитаемые пути для GA4 (эмодзи в URL читать неудобно)
 TAB_PATHS = {
+    TAB_STATUS: "/status",
     TAB_LEAGUES: "/leagues",
     TAB_CABINET: "/dashboard",
     TAB_SOCIAL: "/community",
@@ -303,6 +305,61 @@ st.markdown(
     .dash-diff { font-size: 0.88rem; line-height: 1.7; }
     .dash-diff-me { color: #16A34A; }
     .dash-diff-opp { color: #DC2626; }
+
+    /* Стартовый дашборд «Статус» */
+    .status-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin: 0.3rem 0 0.8rem 0;
+    }
+    .status-lg {
+        flex: 1 1 0;
+        min-width: 78px;
+        border-radius: 10px;
+        padding: 0.55rem 0.4rem;
+        text-align: center;
+        color: #0b1120;
+        border: 1px solid rgba(0, 0, 0, 0.25);
+    }
+    .status-lg b { display: block; font-size: 0.92rem; line-height: 1.2; }
+    .status-lg span { font-size: 0.72rem; opacity: 0.85; }
+    .status-panel {
+        border: 1px solid rgba(0, 223, 122, 0.28);
+        border-radius: 12px;
+        padding: 0.8rem 1rem;
+        background: rgba(10, 20, 16, 0.35);
+        height: 100%;
+    }
+    .status-panel h4 {
+        margin: 0 0 0.6rem 0;
+        font-size: 0.85rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #00DF7A;
+    }
+    .status-metrics { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+    .status-metric {
+        flex: 1 1 40%;
+        border-radius: 8px;
+        padding: 0.45rem 0.6rem;
+        background: rgba(0, 223, 122, 0.07);
+        border: 1px solid rgba(0, 223, 122, 0.18);
+    }
+    .status-metric .lbl {
+        font-size: 0.66rem; letter-spacing: 0.06em;
+        text-transform: uppercase; opacity: 0.7;
+    }
+    .status-metric .val { font-size: 1.25rem; font-weight: 700; }
+    .status-badge {
+        display: inline-block;
+        padding: 0.05rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.82rem;
+        font-weight: 700;
+        color: #0b1120;
+        background: #FFD700;
+    }
 
     /* Футер */
     .fpl-footer {
@@ -1021,6 +1078,10 @@ def build_h2h_schedule(team_ids: list, n_gws: int = 38) -> dict:
     return {gw: rounds[(gw - 1) % len(rounds)] for gw in range(1, n_gws + 1)}
 
 
+FORM_ICONS = {"W": "🟢W", "D": "⚪D", "L": "🔴L"}
+FORM_LENGTH = 5
+
+
 def calculate_h2h_table(
     league_df: pd.DataFrame,
     current_gw: int,
@@ -1030,28 +1091,46 @@ def calculate_h2h_table(
 
     Если передан matches (реальные матчи из API) — считает по ним,
     иначе строит круговой календарь и берёт очки туров из league_df.
+
+    Помимо очков возвращает две колонки для минималистичной вёрстки:
+    - form: последние 5 исходов строкой ("🟢W ⚪D 🔴L ...");
+    - next_opp: имя соперника на тур current_gw + 1 ("—", если календарь кончился).
     """
     if league_df.empty:
-        return league_df.assign(h2h_pts=[], wins=[], draws=[], losses=[])
+        return league_df.assign(
+            h2h_pts=[], wins=[], draws=[], losses=[], form=[], next_opp=[]
+        )
 
     idx_by_team = {int(t): i for i, t in league_df["team_id"].items()}
+    name_by_idx = league_df["team_name"].to_dict()
     stats = {i: {"h2h_pts": 0, "wins": 0, "draws": 0, "losses": 0}
              for i in league_df.index}
+    # История исходов: {индекс команды: [(тур, "W"|"D"|"L"), ...]}
+    outcomes = {i: [] for i in league_df.index}
 
-    def score(ia, ib, pa, pb):
+    def score(ia, ib, pa, pb, gw):
         if pa > pb:
             stats[ia]["h2h_pts"] += 3
             stats[ia]["wins"] += 1
             stats[ib]["losses"] += 1
+            outcomes[ia].append((gw, "W"))
+            outcomes[ib].append((gw, "L"))
         elif pb > pa:
             stats[ib]["h2h_pts"] += 3
             stats[ib]["wins"] += 1
             stats[ia]["losses"] += 1
+            outcomes[ib].append((gw, "W"))
+            outcomes[ia].append((gw, "L"))
         else:
             stats[ia]["h2h_pts"] += 1
             stats[ib]["h2h_pts"] += 1
             stats[ia]["draws"] += 1
             stats[ib]["draws"] += 1
+            outcomes[ia].append((gw, "D"))
+            outcomes[ib].append((gw, "D"))
+
+    next_gw = current_gw + 1
+    next_opp = {i: "—" for i in league_df.index}
 
     if matches is not None and not matches.empty:
         # --- Реальные результаты из API ---
@@ -1061,7 +1140,15 @@ def calculate_h2h_table(
             ib = idx_by_team.get(row.entry_2)
             if ia is None or ib is None:
                 continue  # соперник не из нашего синдиката
-            score(ia, ib, row.pts_1, row.pts_2)
+            score(ia, ib, row.pts_1, row.pts_2, row.event)
+
+        if next_gw <= 38:
+            for row in matches[matches["event"] == next_gw].itertuples():
+                ia = idx_by_team.get(row.entry_1)
+                ib = idx_by_team.get(row.entry_2)
+                if ia is not None and ib is not None:
+                    next_opp[ia] = name_by_idx[ib]
+                    next_opp[ib] = name_by_idx[ia]
     else:
         # --- Запасной круговой календарь по очкам туров ---
         schedule = build_h2h_schedule(list(idx_by_team.keys()), 38)
@@ -1072,11 +1159,26 @@ def calculate_h2h_table(
             pts = league_df[col]
             for team_a, team_b in schedule.get(gw, []):
                 ia, ib = idx_by_team[team_a], idx_by_team[team_b]
-                score(ia, ib, pts.loc[ia], pts.loc[ib])
+                score(ia, ib, pts.loc[ia], pts.loc[ib], gw)
+
+        if next_gw <= 38:
+            for team_a, team_b in schedule.get(next_gw, []):
+                ia, ib = idx_by_team[team_a], idx_by_team[team_b]
+                next_opp[ia] = name_by_idx[ib]
+                next_opp[ib] = name_by_idx[ia]
+
+    def form_string(idx):
+        """Последние FORM_LENGTH исходов, от старых к новым."""
+        rounds = sorted(outcomes[idx], key=lambda t: t[0])[-FORM_LENGTH:]
+        if not rounds:
+            return "—"
+        return " ".join(FORM_ICONS[o] for _, o in rounds)
 
     result = league_df.copy()
     for field in ("h2h_pts", "wins", "draws", "losses"):
         result[field] = [stats[i][field] for i in result.index]
+    result["form"] = [form_string(i) for i in result.index]
+    result["next_opp"] = [next_opp[i] for i in result.index]
     return result
 
 
@@ -1871,84 +1973,72 @@ def form_series(row, gw: int, n: int = 5) -> list:
     ]
 
 
-def zone_style(n_rows: int):
-    """Подсветка строк: топ-3 — золото/зелень, последние 3 — мягкий красный."""
-    def _style(row):
-        pos = row.name  # позиция после reset_index: 0-based
-        if pos == 0:
-            color = "rgba(255, 215, 0, 0.22)"
-        elif pos in (1, 2):
-            color = "rgba(0, 223, 122, 0.16)"
-        elif pos >= n_rows - 3:
-            color = "rgba(220, 60, 60, 0.15)"
-        else:
-            return [""] * len(row)
-        return [f"background-color: {color}"] * len(row)
-
-    return _style
-
-
 def render_league_table(table: pd.DataFrame, tier: str):
-    """Таблица лиги: прогресс-бары, мини-график формы, ссылка на профиль."""
+    """Минималистичная H2H-таблица в духе официального приложения АПЛ.
+
+    Только шесть колонок: место, кликабельное имя команды, очки H2H,
+    форма за 5 матчей, очки текущего тура и соперник на следующий.
+    """
+    gw_c = gw_col(current_gw)
+    gw_points = (
+        table[gw_c].fillna(0).astype(int).values
+        if gw_c in table.columns
+        else [0] * len(table)
+    )
+
+    # LinkColumn показывает в ячейке текст, извлечённый из URL регуляркой.
+    # Кладём имя команды в якорь: FPL его игнорирует, а мы получаем
+    # кликабельное имя команды вместо «голого» адреса.
+    team_links = [
+        f"{FPL_ENTRY_URL.format(team_id=int(t))}#{name}"
+        for t, name in zip(table["team_id"], table["team_name"])
+    ]
+
     view = pd.DataFrame(
         {
-            "Место": range(1, len(table) + 1),
-            "Команда": table["team_name"].values,
-            "Менеджер": table["manager_name"].values,
-            "Очки H2H": table["h2h_pts"].values,
-            "В": table["wins"].values,
-            "Н": table["draws"].values,
-            "П": table["losses"].values,
-            "Форма": [
-                form_series(row, current_gw) for _, row in table.iterrows()
-            ],
-            "Total": table["total_pts"].values,
-            "Профиль": [
-                FPL_ENTRY_URL.format(team_id=int(t)) for t in table["team_id"]
-            ],
+            "Pos": range(1, len(table) + 1),
+            "Team": team_links,
+            "Pts": table["h2h_pts"].values,
+            "Form": table["form"].values,
+            "GW": gw_points,
+            "Next": table["next_opp"].values,
         }
     )
 
-    max_h2h = max(int(view["Очки H2H"].max()), 1)
-    max_total = max(int(view["Total"].max()), 1)
-
     config = {
-        "Место": st.column_config.NumberColumn("#", width="small"),
-        "Команда": st.column_config.TextColumn("Команда", width="medium"),
-        "Менеджер": st.column_config.TextColumn("Менеджер", width="medium"),
-        "Очки H2H": st.column_config.ProgressColumn(
-            "Очки H2H",
-            help="3 за победу, 1 за ничью, 0 за поражение",
-            format="%d",
-            min_value=0,
-            max_value=max_h2h,
+        "Pos": st.column_config.NumberColumn(
+            "Pos", width="small", alignment="center"
         ),
-        "В": st.column_config.NumberColumn("В", width="small"),
-        "Н": st.column_config.NumberColumn("Н", width="small"),
-        "П": st.column_config.NumberColumn("П", width="small"),
-        "Форма": st.column_config.LineChartColumn(
-            "Форма (5 туров)",
-            help="Очки за последние 5 сыгранных туров",
-            y_min=0,
+        "Team": st.column_config.LinkColumn(
+            "Team",
+            width="medium",
+            display_text=r"#(.*)$",  # текст ссылки = имя команды из якоря
         ),
-        "Total": st.column_config.ProgressColumn(
-            "Total",
-            format="%d",
-            min_value=0,
-            max_value=max_total,
+        "Pts": st.column_config.NumberColumn(
+            "Pts",
+            width="small",
+            alignment="center",
+            help="3 очка за победу, 1 за ничью, 0 за поражение",
         ),
-        "Профиль": st.column_config.LinkColumn(
-            "FPL", display_text="Открыть ↗", width="small"
+        "Form": st.column_config.TextColumn(
+            "Form",
+            width="medium",
+            alignment="center",
+            help="Последние 5 матчей, от старых к новым",
+        ),
+        "GW": st.column_config.NumberColumn(
+            f"GW{current_gw}",
+            width="small",
+            alignment="center",
+            help="Очки, набранные в текущем туре",
+        ),
+        "Next": st.column_config.TextColumn(
+            "Next", width="medium", help="Соперник в следующем туре"
         ),
     }
 
-    if compact:
-        drop = ["Менеджер", "В", "Н", "П"]
-        view = view.drop(columns=drop)
-        config = {k: v for k, v in config.items() if k not in drop}
-
     st.dataframe(
-        view.style.apply(zone_style(len(view)), axis=1),
+        view,
         column_config=config,
         hide_index=True,
         use_container_width=True,
@@ -2069,9 +2159,156 @@ METRICS_PER_ROW = 2 if compact else 4
 # ---------- Вывод: вкладки ----------
 
 (
-    tab_leagues, tab_cabinet, tab_social, tab_cups, tab_squid, tab_fame,
-    tab_wallet, tab_exchange,
+    tab_status, tab_leagues, tab_cabinet, tab_social, tab_cups, tab_squid,
+    tab_fame, tab_wallet, tab_exchange,
 ) = st.tabs(TAB_LABELS)
+
+
+def _lg_grad_color(rank: int, total: int) -> str:
+    """Плавный переход от зелёного (лучшая лига) к красному (худшая)."""
+    if total <= 1:
+        return "#4ade80"
+    t = rank / (total - 1)  # 0 у лучшей, 1 у худшей
+    top = (74, 222, 128)      # #4ade80
+    bot = (248, 113, 113)     # #f87171
+    r = round(top[0] + (bot[0] - top[0]) * t)
+    g = round(top[1] + (bot[1] - top[1]) * t)
+    b = round(top[2] + (bot[2] - top[2]) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _status_top_table(frame, value_col, value_fmt):
+    """Топ-3 строки в единой раскладке: #, Лига, Команда, значение."""
+    out = []
+    for place, (_, row) in enumerate(frame.iterrows(), start=1):
+        out.append(
+            {
+                "#": place,
+                "Лига": row["league_tier"],
+                "Команда": row["team_name"],
+                value_col: value_fmt(row),
+            }
+        )
+    table = pd.DataFrame(out)
+    if not table.empty:
+        table = table.set_index("#")
+    return table
+
+
+with tab_status:
+    st.header("📊 Статус")
+    st.caption(f"Сводка по состоянию на GW{current_gw}.")
+
+    if df.empty:
+        st.info("Данных пока нет — дашборд заполнится после старта сезона.")
+    else:
+        # ===== Ряд 1: рейтинг дивизионов =====
+        st.subheader("Top H2H Average — рейтинг дивизионов")
+        rating = division_rating(df)
+        if rating.empty:
+            st.info("Рейтинг появится после первого сыгранного тура.")
+        else:
+            n = len(rating)
+            cards = []
+            for i, (_, r) in enumerate(rating.iterrows()):
+                color = _lg_grad_color(i, n)
+                cards.append(
+                    f'<div class="status-lg" style="background:{color}">'
+                    f'<b>{r["Дивизион"]}</b>'
+                    f'<span>{r["Средний Total"]:.1f} ср.</span></div>'
+                )
+            st.markdown(
+                f'<div class="status-row">{"".join(cards)}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ===== Ряд 2: Squid Game + Classic League =====
+        c1, c2 = st.columns([1, 1])
+
+        with c1:
+            history, last_round = calculate_squid_game(df, current_gw)
+            st.markdown('<div class="status-panel">', unsafe_allow_html=True)
+            st.markdown("<h4>🦑 Squid Game</h4>", unsafe_allow_html=True)
+            if last_round is None:
+                st.caption("Расчёт станет доступен после первого тура.")
+            else:
+                total_players = len(df)
+                alive_before = len(last_round["alive_before"])
+                eliminated_earlier = total_players - alive_before
+                dead = len(last_round["dead_now"]) + eliminated_earlier
+                alive = len(last_round["survivors"])
+                metrics = [
+                    ("DEAD", str(dead)),
+                    ("ALIVE", str(alive)),
+                    ("AVERAGE PTS", f"{last_round['avg']:.1f}"),
+                    ("BANK", f"{last_round['bank']:,} ₸".replace(",", " ")),
+                ]
+                cells = "".join(
+                    f'<div class="status-metric"><div class="lbl">{lbl}</div>'
+                    f'<div class="val">{val}</div></div>'
+                    for lbl, val in metrics
+                )
+                st.markdown(
+                    f'<div class="status-metrics">{cells}</div>',
+                    unsafe_allow_html=True,
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with c2:
+            st.markdown('<div class="status-panel">', unsafe_allow_html=True)
+            st.markdown(
+                "<h4>🏆 Classic League — топ-3</h4>", unsafe_allow_html=True
+            )
+            top3 = df.nlargest(3, "total_pts")
+            classic = _status_top_table(
+                top3, "PTS", lambda r: int(r["total_pts"])
+            )
+            classic = classic.rename(columns={"Команда": "TEAM"})
+            st.dataframe(classic, use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ===== Ряд 3: макс очков за тур + самая дорогая команда =====
+        c3, c4 = st.columns([1, 1])
+
+        with c3:
+            st.markdown('<div class="status-panel">', unsafe_allow_html=True)
+            st.markdown(
+                '<h4>🔥 Максимум очков за тур '
+                '<span class="status-badge">20k</span></h4>',
+                unsafe_allow_html=True,
+            )
+            gw_c = gw_col(current_gw)
+            if gw_c in df.columns and df[gw_c].notna().any():
+                top_gw = df.nlargest(3, gw_c)
+                gw_tbl = _status_top_table(
+                    top_gw, "Очки", lambda r: int(r[gw_c])
+                )
+                st.dataframe(gw_tbl, use_container_width=True)
+            else:
+                st.caption(f"Очки за GW{current_gw} пока не сыграны.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with c4:
+            st.markdown('<div class="status-panel">', unsafe_allow_html=True)
+            st.markdown(
+                '<h4>💎 Самая дорогая команда '
+                '<span class="status-badge">20k</span></h4>',
+                unsafe_allow_html=True,
+            )
+            if "team_value" in df.columns and df["team_value"].notna().any():
+                top_val = (
+                    df[df["team_value"].notna()]
+                    .nlargest(3, "team_value")
+                )
+                val_tbl = _status_top_table(
+                    top_val, "Цена", lambda r: f"{r['team_value']:.1f}m"
+                )
+                st.dataframe(val_tbl, use_container_width=True)
+            else:
+                st.caption(
+                    "Стоимость команд доступна только в режиме API FPL."
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
 
 with tab_leagues:
     if h2h_matches_by_tier:
