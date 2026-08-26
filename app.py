@@ -2970,8 +2970,8 @@ with tab_social:
 with tab_exchange:
     st.header("📈 FPL Exchange")
     st.caption(
-        "Игроки как активы: форма, спрос рынка (нетто-трансферы), отдача на "
-        "цену (ROI) и сложность ближайших матчей (FDR). Данные — из FPL API."
+        "Игроки как активы: форма, спрос рынка, отдача на "
+        "цену и сложность ближайших матчей (FDR). Данные — из FPL."
     )
 
     exch_df, exch_src = fetch_exchange_data()
@@ -2990,7 +2990,7 @@ with tab_exchange:
         movers_in = exch_df.nlargest(3, "net_transfers")
         movers_out = exch_df.nsmallest(3, "net_transfers")
 
-        st.markdown("**🟢 Лидеры закупок (нетто-трансферы за тур)**")
+        st.markdown("**🟢 Лидеры закупок**")
         metric_grid(
             [
                 (
