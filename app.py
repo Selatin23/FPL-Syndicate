@@ -422,27 +422,12 @@ def render_banner(status_chip: str):
     )
 
 
-EXCEL_FILE = "Teams_2025.xlsx"
-
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
 
 # Все лиги турнира в иерархическом порядке — выводятся по мере наполнения
 ALL_LEAGUES = [
     "Premier League", "A-1", "A-2", "B-1", "B-2", "B-3", "C-1", "C-2", "D",
 ]
-
-# Маппинг названий лиг из Excel в наш единый стандарт league_tier
-LEAGUE_NAME_MAP = {
-    "H2H League PL": "Premier League",
-    "H2H League A-1": "A-1",
-    "H2H League A-2": "A-2",
-    "H2H League B-1": "B-1",
-    "H2H League B-2": "B-2",
-    "H2H League B-3": "B-3",
-    "H2H League C-1": "C-1",
-    "H2H League C-2": "C-2",
-    "H2H League D": "D",
-}
 
 # Постоянная ссылка на опубликованный CSV админ-панели
 CSV_URL = (
@@ -520,71 +505,6 @@ def sum_gw_range(df: pd.DataFrame, start: int, end: int) -> pd.Series:
     if not cols:
         return pd.Series(0, index=df.index)
     return df[cols].sum(axis=1)
-
-
-def normalize_league(raw_value) -> str:
-    """Приводит название лиги из Excel к стандарту league_tier."""
-    raw = str(raw_value).strip()
-    if raw in LEAGUE_NAME_MAP:
-        return LEAGUE_NAME_MAP[raw]
-    # Запасной вариант: убираем префикс "H2H League" и сверяем остаток
-    stripped = re.sub(r"^H2H\s+League\s+", "", raw, flags=re.IGNORECASE).strip()
-    if stripped == "PL":
-        return "Premier League"
-    if stripped in ALL_LEAGUES:
-        return stripped
-    return raw  # неизвестная лига — вернём как есть, покажем в warning
-
-
-# ---------- Загрузка данных сезона 2025 из Excel ----------
-
-@st.cache_data
-def load_mock_data(path: str) -> pd.DataFrame:
-    raw_df = pd.read_excel(path)
-    raw_df.columns = [str(c).strip() for c in raw_df.columns]
-
-    rename_map = {
-        "Fantasy ID": "team_id",
-        "Manager": "manager_name",
-        "Team Name": "team_name",
-    }
-    # Колонки туров: GW1..GW38 -> gw1_pts..gw38_pts
-    for col in raw_df.columns:
-        m = re.fullmatch(r"GW\s?(\d+)", col, flags=re.IGNORECASE)
-        if m:
-            rename_map[col] = gw_col(int(m.group(1)))
-
-    df = raw_df.rename(columns=rename_map)
-
-    required = ["team_id", "manager_name", "team_name", "League"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(
-            f"В файле {path} отсутствуют колонки: {', '.join(missing)}"
-        )
-
-    df["league_tier"] = df["League"].apply(normalize_league)
-
-    df["team_id"] = pd.to_numeric(df["team_id"], errors="coerce")
-    df = df.dropna(subset=["team_id"]).copy()
-    df["team_id"] = df["team_id"].astype(int)
-
-    for col in get_gw_cols(df):
-        # round, а не truncate: в файле встречаются дробные значения (51.9)
-        df[col] = (
-            pd.to_numeric(df[col], errors="coerce").fillna(0).round().astype(int)
-        )
-
-    # Стоимости состава в файле нет — оставляем пустой колонкой
-    if "team_value" not in df.columns:
-        df["team_value"] = pd.NA
-    df["team_value"] = pd.to_numeric(df["team_value"], errors="coerce")
-
-    keep = (
-        ["team_id", "manager_name", "team_name", "league_tier", "team_value"]
-        + get_gw_cols(df)
-    )
-    return df[keep]
 
 
 # ---------- Чтение админ-панели из Google Sheets ----------
@@ -794,7 +714,8 @@ def fetch_fpl_data(team_ids: list[int], team_tier_map: dict) -> pd.DataFrame:
     if not rows:
         st.error(
             "Серверы FPL недоступны или ни одна команда не загрузилась. "
-            "Переключись на данные сезона 2025 в боковой панели."
+            "Попробуй обновить страницу через пару минут — "
+            "данные кэшируются на 10 минут."
         )
         return pd.DataFrame(
             columns=[
@@ -1714,7 +1635,9 @@ def fetch_manager_summary(team_id: int) -> dict | None:
             f"{FPL_BASE_URL}/entry/{team_id}/history/", timeout=10
         )
         hist.raise_for_status()
-        current = hist.json().get("current", [])
+        hist_json = hist.json()
+        current = hist_json.get("current", [])
+        used_chips = hist_json.get("chips", [])
 
         gw = entry.get("current_event")
         bank = None
@@ -1729,16 +1652,21 @@ def fetch_manager_summary(team_id: int) -> dict | None:
                 bank = pj.get("entry_history", {}).get("bank")
                 squad = [p["element"] for p in pj.get("picks", [])]
 
-        # Свободные трансферы FPL напрямую не отдаёт — оцениваем по истории:
-        # +1 за тур, но не больше 5, минус сделанные трансферы прошлого тура.
+        # Свободные трансферы FPL напрямую не отдаёт — оцениваем по истории.
+        # На старте сезона (истории нет или сыгран один тур) накопить второй
+        # трансфер физически негде, поэтому строго 1.
         free_transfers = None
         if current:
-            last = current[-1]
-            # эвристика: если в прошлом туре не было трансферов — накопился 2-й
-            made = last.get("event_transfers", 0)
-            free_transfers = 1 if made > 0 else 2
+            if len(current) <= 1:
+                free_transfers = 1
+            else:
+                # если в прошлом туре не было трансферов — накопился 2-й
+                made = current[-1].get("event_transfers", 0)
+                free_transfers = 1 if made > 0 else 2
             if bank is None:
-                bank = last.get("bank")
+                bank = current[-1].get("bank")
+        else:
+            free_transfers = 1
 
         return {
             "team_id": team_id,
@@ -1751,10 +1679,55 @@ def fetch_manager_summary(team_id: int) -> dict | None:
             "bank": (bank / 10) if bank is not None else None,
             "free_transfers": free_transfers,
             "squad": squad,
+            "chips": used_chips,
             "overall_rank": entry.get("summary_overall_rank"),
         }
     except (requests.exceptions.RequestException, ValueError, KeyError):
         return None
+
+
+# Стандартный набор фишек на сезон: Wildcard даётся дважды, остальные по разу
+CHIP_ALLOWANCE = [
+    ("wildcard", "Wildcard", 2),
+    ("freehit", "Free Hit", 1),
+    ("3xc", "Triple Captain", 1),
+    ("bboost", "Bench Boost", 1),
+]
+
+
+def chip_inventory(used_chips):
+    """Разбирает список использованных фишек из FPL API.
+
+    Возвращает (использованные, оставшиеся) как списки строк для показа.
+    В API каждая запись выглядит как {"name": "wildcard", "event": 5, ...}.
+    """
+    counts = {}
+    for chip in used_chips or []:
+        name = (chip.get("name") or "").lower() if isinstance(chip, dict) else ""
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+
+    used, left = [], []
+    for key, label, allowance in CHIP_ALLOWANCE:
+        spent = min(counts.get(key, 0), allowance)
+        remaining = allowance - spent
+        if spent:
+            # Показываем туры, в которых фишку сыграли
+            events = [
+                str(c.get("event"))
+                for c in (used_chips or [])
+                if isinstance(c, dict)
+                and (c.get("name") or "").lower() == key
+                and c.get("event") is not None
+            ]
+            tag = f"{label} x{spent}" if spent > 1 else label
+            if events:
+                tag += f" (GW{', GW'.join(events)})"
+            used.append(tag)
+        if remaining:
+            left.append(f"{label} x{remaining}" if remaining > 1 else label)
+
+    return used, left
 
 
 def player_lookup(boot: dict) -> dict:
@@ -1830,92 +1803,53 @@ st.sidebar.markdown(
 )
 st.sidebar.divider()
 
-st.sidebar.header("Сезон")
-data_source = st.sidebar.radio(
-    "Выберите сезон:",
-    ("Сезон 2025-2026", "Сезон 2026-2027"),
-    index=1,
-)
+# Единственный источник данных — реальный FPL API плюс админ-таблица
+try:
+    (
+        team_ids, team_tier_map, payment_map, league_id_map, pin_map,
+        manager_team_map,
+    ) = load_admin_sheet(CSV_URL)
+except Exception as e:
+    st.error(
+        "Не удалось загрузить админ-таблицу Google Sheets. "
+        f"Проверь CSV_URL и доступ к публикации.\n\nДетали: {e}"
+    )
+    st.stop()
 
-if data_source == "Сезон 2025-2026":
-    try:
-        df = load_mock_data(EXCEL_FILE)
-    except FileNotFoundError:
-        st.error(
-            f"Файл {EXCEL_FILE} не найден. Положи его в одну папку с app.py."
-        )
-        st.stop()
-    except Exception as e:
-        st.error(f"Не удалось прочитать {EXCEL_FILE}: {e}")
-        st.stop()
+if not team_ids:
+    st.error(
+        "Админ-таблица загрузилась, но не содержит ни одного "
+        "валидного FPL_Team_ID. Заполни колонку FPL_Team_ID."
+    )
+    st.stop()
 
-    # Предупреждение о лигах, не попавших в стандарт ALL_LEAGUES
-    unknown = sorted(set(df["league_tier"]) - set(ALL_LEAGUES))
-    if unknown:
+with st.spinner("Загружаю данные из FPL API..."):
+    df = fetch_fpl_data(team_ids, team_tier_map)
+
+# Реальные H2H-матчи по League_ID из админ-таблицы
+h2h_matches_by_tier = {}
+if league_id_map:
+    h2h_errors = []
+    with st.spinner("Загружаю матчи H2H-лиг..."):
+        for tier, league_id in league_id_map.items():
+            try:
+                m = fetch_h2h_matches(league_id)
+                if not m.empty:
+                    h2h_matches_by_tier[tier] = m
+            except requests.exceptions.RequestException as e:
+                h2h_errors.append(f"{tier} (ID {league_id}): {e}")
+    if h2h_errors:
         st.warning(
-            "В файле есть лиги вне стандартного списка, их команды не "
-            f"отобразятся в таблицах: {', '.join(unknown)}. "
-            "Проверь LEAGUE_NAME_MAP."
+            "Не удалось загрузить матчи лиг:\n\n- "
+            + "\n- ".join(h2h_errors)
+            + "\n\nДля них используется сгенерированный календарь."
         )
-
-    # Статусы взносов подтягиваем из админ-таблицы; её недоступность не критична
-    try:
-        (
-            _, _, payment_map, league_id_map, pin_map, manager_team_map,
-        ) = load_admin_sheet(CSV_URL)
-    except Exception:
-        payment_map, pin_map, manager_team_map = {}, {}, {}
-        league_id_map = {}
-    # Реальные H2H-матчи относятся к текущему сезону, а в Excel — прошлый,
-    # поэтому здесь всегда используем сгенерированный календарь.
-    h2h_matches_by_tier = {}
 else:
-    try:
-        (
-            team_ids, team_tier_map, payment_map, league_id_map, pin_map,
-            manager_team_map,
-        ) = load_admin_sheet(CSV_URL)
-    except Exception as e:
-        st.error(
-            "Не удалось загрузить админ-таблицу Google Sheets. "
-            f"Проверь CSV_URL и доступ к публикации.\n\nДетали: {e}"
-        )
-        st.stop()
-
-    if not team_ids:
-        st.error(
-            "Админ-таблица загрузилась, но не содержит ни одного "
-            "валидного FPL_Team_ID. Заполни колонку FPL_Team_ID."
-        )
-        st.stop()
-
-    with st.spinner("Загружаю данные из FPL API..."):
-        df = fetch_fpl_data(team_ids, team_tier_map)
-
-    # Реальные H2H-матчи по League_ID из админ-таблицы
-    h2h_matches_by_tier = {}
-    if league_id_map:
-        h2h_errors = []
-        with st.spinner("Загружаю матчи H2H-лиг..."):
-            for tier, league_id in league_id_map.items():
-                try:
-                    m = fetch_h2h_matches(league_id)
-                    if not m.empty:
-                        h2h_matches_by_tier[tier] = m
-                except requests.exceptions.RequestException as e:
-                    h2h_errors.append(f"{tier} (ID {league_id}): {e}")
-        if h2h_errors:
-            st.warning(
-                "Не удалось загрузить матчи лиг:\n\n- "
-                + "\n- ".join(h2h_errors)
-                + "\n\nДля них используется сгенерированный календарь."
-            )
-    else:
-        st.info(
-            f"Колонка {ADMIN_LEAGUE_ID_COL} в админ-таблице пуста — "
-            "таблицы строятся по сгенерированному круговому календарю. "
-            "Заполни её, чтобы использовать реальные матчи FPL."
-        )
+    st.info(
+        f"Колонка {ADMIN_LEAGUE_ID_COL} в админ-таблице пуста — "
+        "таблицы строятся по сгенерированному круговому календарю. "
+        "Заполни её, чтобы использовать реальные матчи FPL."
+    )
 
 if df.empty:
     st.stop()
@@ -1930,9 +1864,8 @@ current_gw = st.sidebar.slider(
     value=min(max(auto_gw, 1), 38),
 )
 
-# Статус сезона: из API в онлайн-режиме, иначе по выбранному туру
-api_mode = data_source != "Сезон 2025-2026"
-current_event = fetch_current_event() if api_mode else None
+# Статус сезона берём напрямую из FPL API
+current_event = fetch_current_event()
 render_banner(season_status_chip(current_event, current_gw))
 
 # ---------- Расчёт общих очков ----------
@@ -2306,7 +2239,8 @@ with tab_status:
                 st.dataframe(val_tbl, use_container_width=True)
             else:
                 st.caption(
-                    "Стоимость команд доступна только в режиме API FPL."
+                    "Стоимость составов появится, когда FPL отдаст данные "
+                    "первого тура."
                 )
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2473,6 +2407,26 @@ with tab_cabinet:
                     str(opp["free_transfers"])
                     if opp.get("free_transfers") is not None else "—",
                 )
+
+                # Фишки соперника: что уже потрачено и что ещё в запасе
+                chips_used, chips_left = chip_inventory(opp.get("chips"))
+                ch1, ch2 = st.columns(2)
+                with ch1:
+                    st.markdown("**🎲 Фишки использованы**")
+                    st.markdown(
+                        '<div class="dash-diff dash-diff-opp">'
+                        + ("<br>".join(chips_used) if chips_used else "пока ни одной")
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
+                with ch2:
+                    st.markdown("**🃏 Фишки в запасе**")
+                    st.markdown(
+                        '<div class="dash-diff dash-diff-me">'
+                        + ("<br>".join(chips_left) if chips_left else "все потрачены")
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
 
                 # Дифференциалы составов
                 if summary and summary.get("squad") and opp.get("squad"):
@@ -2832,7 +2786,7 @@ with tab_wallet:
             )
 
     # --- Общая таблица призовых по всем менеджерам ---
-    st.subheader("Призовые всех менеджеров")
+    st.subheader("Прогноз призовых всех менеджеров")
     st.caption(
         "Сортировка по сумме; нажми на заголовок колонки, чтобы "
         "пересортировать."
@@ -2844,7 +2798,7 @@ with tab_wallet:
                 "Менеджер": df.loc[idx, "manager_name"],
                 "Команда": df.loc[idx, "team_name"],
                 "Лига": df.loc[idx, "league_tier"],
-                "Категорий": len(plist),
+                "Категории": ", ".join(c for c, _ in plist) or "—",
                 "Итого, ₸": sum(a for _, a in plist),
             }
         )
@@ -2855,9 +2809,9 @@ with tab_wallet:
     )
     board.index = board.index + 1
     board_cols = (
-        ["Менеджер", "Категорий", "Итого, ₸"]
+        ["Менеджер", "Категории", "Итого, ₸"]
         if compact
-        else ["Менеджер", "Команда", "Лига", "Категорий", "Итого, ₸"]
+        else ["Менеджер", "Команда", "Лига", "Категории", "Итого, ₸"]
     )
     st.dataframe(board[board_cols], use_container_width=True)
     paid_total = int(board["Итого, ₸"].sum())
@@ -2867,12 +2821,10 @@ with tab_wallet:
     )
 
     st.caption(
-        "Номинации, ожидающие данных: "
-        + "; ".join(
-            f"{name} ({amount:,} ₸ — {reason})".replace(",", " ")
-            for name, amount, reason in PRIZE_PENDING
-        )
-        + "."
+        "Номинации, ожидающие результаты: "
+        + "; ".join(name for name, _, _ in PRIZE_PENDING)
+        + ". Эти номинации будут внесены в таблицу по фактическим "
+        "результатам."
     )
 
 
