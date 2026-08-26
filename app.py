@@ -554,7 +554,7 @@ def load_admin_sheet(url: str):
             if not valid.empty:
                 league_id_map[tier] = int(valid.iloc[0])
 
-    # PIN = последние 4 цифры телефона. Сам номер наружу не отдаём.
+    # PIN = последние 4 цифры FPL ID. Сам номер наружу не отдаём.
     pin_map = {}
     manager_team_map = {}
     for manager, phone, tid in zip(
@@ -2045,7 +2045,7 @@ else:
         "Менеджер", options=sorted(pin_map.keys()), key="login_name"
     )
     login_pin = st.sidebar.text_input(
-        "PIN-код (последние 4 цифры телефона)",
+        "PIN-код (последние 4 цифры FPL ID)",
         type="password",
         max_chars=4,
         key="login_pin",
