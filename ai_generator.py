@@ -13,12 +13,18 @@
     python ai_generator.py --limit 5 --dry-run   # прогон без записи в БД
 
 Переменные окружения (или файл .env рядом со скриптом):
-    ZHIPU_API_KEY          ключ Zhipu AI (open.bigmodel.cn)
+    LLM_API_KEY            ключ провайдера (принимается также GROQ_API_KEY
+                           и ZHIPU_API_KEY — для совместимости со старым .env)
     SUPABASE_URL           https://<проект>.supabase.co
     SUPABASE_SERVICE_KEY   service_role-ключ (НЕ anon — anon не имеет прав
                            на запись в ai_insights)
     ADMIN_CSV_URL          опубликованный CSV админ-таблицы
-    ZHIPU_MODEL            необязательно, по умолчанию glm-4-flash
+    LLM_MODEL              необязательно, по умолчанию openai/gpt-oss-20b
+    LLM_BASE_URL           необязательно, по умолчанию Groq
+
+Смена провайдера — это только две переменные, код трогать не нужно:
+    Groq   LLM_BASE_URL=https://api.groq.com/openai/v1
+    Zhipu  LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
 """
 
 from __future__ import annotations
@@ -48,12 +54,20 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
-ZHIPU_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_MODEL = "llama-3.1-8b-instant"
+
+# Провайдер задаётся переменными окружения — код от него не зависит,
+# лишь бы API был совместим с OpenAI SDK.
+DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
+
+# ВНИМАНИЕ: Groq отключил llama-3.1-8b-instant и llama-3.3-70b-versatile
+# (объявлено 17.06.2026). Обращение к ним возвращает 404 model_not_found.
+# Актуальная замена малой модели — openai/gpt-oss-20b.
+# Список моделей меняется часто: https://console.groq.com/docs/deprecations
+DEFAULT_MODEL = "openai/gpt-oss-20b"
 
 AI_TABLE = "ai_insights"
 
-# Воркеры для сети и для LLM разведены: у FPL и у Zhipu разные лимиты,
+# Воркеры для сети и для LLM разведены: у FPL и у LLM разные лимиты,
 # и упереться в рейт-лимит модели гораздо неприятнее.
 FPL_WORKERS = 15
 LLM_WORKERS = 6
@@ -66,9 +80,18 @@ ADMIN_TIER_COL = "League_Tier"
 ADMIN_LEAGUE_ID_COL = "League_ID"
 
 
-def env(name: str, default: str | None = None) -> str | None:
-    value = os.environ.get(name, default)
-    return value.strip() if isinstance(value, str) else value
+def env(*names: str, default: str | None = None) -> str | None:
+    """Первое непустое значение из перечисленных переменных окружения.
+
+    Несколько имён нужны для совместимости: старые .env писались под Zhipu
+    (ZHIPU_API_KEY), новые — под Groq. Ломать чужой .env переименованием
+    константы в коде было бы неприятно.
+    """
+    for name in names:
+        value = os.environ.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return default
 
 
 def load_dotenv_if_present() -> None:
@@ -310,34 +333,213 @@ def build_prompt(me: Manager, opp: Manager, players: dict) -> str:
     )
 
 
+# Reasoning-модели (gpt-oss и подобные) сначала тратят токены на размышления,
+# и только потом пишут ответ. Оба вида токенов считаются в max_tokens: при
+# слишком малом лимите модель упирается в потолок ещё на этапе рассуждений и
+# возвращает ПУСТОЙ content с finish_reason="length". Отсюда запас.
+LLM_MAX_TOKENS = 1200
+LLM_MAX_TOKENS_RETRY = 3000   # вторая попытка, если ответ обрезало
+
+
+# Ставится в True, если провайдер не понял reasoning-параметры,
+# чтобы не слать их снова на каждом следующем менеджере.
+_DISABLE_REASONING_PARAMS = False
+
+
+def is_reasoning_model(model: str) -> bool:
+    return any(m in model.lower() for m in ("gpt-oss", "reason", "-r1", "qwq"))
+
+
+def _completion_kwargs(model: str, prompt: str, max_tokens: int) -> dict:
+    kwargs = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_tokens": max_tokens,
+    }
+    if is_reasoning_model(model) and not _DISABLE_REASONING_PARAMS:
+        # Просим думать поменьше и не присылать сам ход мыслей — нам нужен
+        # только итоговый текст. include_reasoning — расширение Groq,
+        # поэтому уходит через extra_body.
+        kwargs["reasoning_effort"] = "low"
+        kwargs["extra_body"] = {"include_reasoning": False}
+    return kwargs
+
+
+def extract_message_text(resp):
+    """(текст, finish_reason, диагностика) из ответа любого провайдера.
+
+    Разные провайдеры кладут ответ по-разному, поэтому проверяем несколько
+    полей. Поле с рассуждениями (reasoning) намеренно НЕ используем как
+    ответ — это ход мыслей модели, публиковать его менеджерам нельзя.
+    """
+    try:
+        choice = resp.choices[0]
+    except (AttributeError, IndexError, TypeError):
+        return None, None, "в ответе нет choices"
+
+    finish = getattr(choice, "finish_reason", None)
+    message = getattr(choice, "message", None)
+    if message is None:
+        return None, finish, "в choices[0] нет message"
+
+    content = getattr(message, "content", None)
+    if isinstance(content, str) and content.strip():
+        return content.strip(), finish, ""
+
+    # Некоторые провайдеры отдают список блоков вместо строки
+    if isinstance(content, list):
+        parts = [
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") in (None, "text")
+        ]
+        joined = " ".join(p for p in parts if p).strip()
+        if joined:
+            return joined, finish, ""
+
+    reasoning = (
+        getattr(message, "reasoning", None)
+        or getattr(message, "reasoning_content", None)
+    )
+    if reasoning:
+        return None, finish, (
+            "content пуст, но есть reasoning — модель израсходовала лимит "
+            "на размышления"
+        )
+    return None, finish, "content пуст"
+
+
 def generate_insight(client, model: str, prompt: str, retries: int = 3) -> str | None:
-    """Один запрос к модели с повторами при рейт-лимите."""
+    """Один разбор от модели. None — если получить текст не удалось.
+
+    Обрабатывает три разных сбоя: временные ошибки сети/лимитов (повтор),
+    фатальные ошибки модели или ключа (сразу выход) и пустой ответ
+    reasoning-модели из-за нехватки max_tokens (повтор с большим лимитом).
+    """
+    max_tokens = LLM_MAX_TOKENS
+
     for attempt in range(1, retries + 1):
         try:
             resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=220,
+                **_completion_kwargs(model, prompt, max_tokens)
             )
-            text = (resp.choices[0].message.content or "").strip()
+            text, finish, diag = extract_message_text(resp)
             if text:
                 return text
+
+            # Пустой ответ — разбираемся, почему именно
+            usage = getattr(resp, "usage", None)
+            used = getattr(usage, "completion_tokens", "?") if usage else "?"
+            print(
+                f"    ! пустой ответ модели: {diag}; "
+                f"finish_reason={finish}, использовано токенов={used}, "
+                f"лимит={max_tokens}"
+            )
+
+            # Ответ обрезали по длине — даём заметно больший лимит
+            if finish == "length" and max_tokens < LLM_MAX_TOKENS_RETRY:
+                max_tokens = LLM_MAX_TOKENS_RETRY
+                print(f"    повтор с max_tokens={max_tokens}")
+                continue
             return None
+
         except Exception as e:  # SDK бросает разные типы, ловим широко
-            wait = 2 ** attempt
             msg = str(e)
+            low = msg.lower()
+
+            # Провайдер не знает наших доп. параметров — убираем и пробуем снова
+            if any(
+                s in low
+                for s in ("include_reasoning", "reasoning_effort",
+                          "unknown parameter", "unrecognized")
+            ):
+                global _DISABLE_REASONING_PARAMS
+                if not _DISABLE_REASONING_PARAMS:
+                    _DISABLE_REASONING_PARAMS = True
+                    print(
+                        "    провайдер не принял reasoning-параметры, "
+                        f"убираю их и повторяю ({msg[:80]})"
+                    )
+                    continue
+
+            # Неверная модель/ключ повторять бессмысленно — ответ не изменится.
+            if is_fatal_error(msg):
+                print(f"    ! {type(e).__name__}: {msg[:200]}")
+                return None
+
+            wait = 2 ** attempt
             transient = any(
-                s in msg.lower()
-                for s in ("rate", "timeout", "429", "500", "502", "503", "concurren")
+                s in low
+                for s in ("rate", "timeout", "429", "500", "502", "503",
+                          "concurren", "connection")
             )
             if attempt < retries and transient:
-                print(f"    повтор через {wait}s ({msg[:70]})")
+                print(f"    повтор через {wait}s ({type(e).__name__}: {msg[:70]})")
                 time.sleep(wait)
                 continue
-            print(f"    ! генерация не удалась: {msg[:120]}")
+            print(f"    ! генерация не удалась — {type(e).__name__}: {msg[:200]}")
             return None
     return None
+
+
+FATAL_MARKERS = (
+    "model_not_found", "model_decommissioned", "does not exist",
+    "decommissioned", "invalid_api_key", "authentication",
+    "401", "403", "404",
+)
+
+
+def is_fatal_error(msg: str) -> bool:
+    """Ошибка, которую бесполезно повторять (модель/ключ/доступ)."""
+    low = msg.lower()
+    return any(m in low for m in FATAL_MARKERS)
+
+
+def list_available_models(base_url: str, api_key: str) -> list[str]:
+    """Модели, доступные ключу. Пустой список — если эндпоинт не отдал их."""
+    try:
+        resp = requests.get(
+            f"{base_url.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=20,
+        )
+        if not resp.ok:
+            return []
+        return sorted(
+            m["id"] for m in resp.json().get("data", []) if m.get("id")
+        )
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        return []
+
+
+def preflight_check(base_url: str, api_key: str, model: str) -> bool:
+    """Проверяет модель ОДНИМ запросом до генерации всех разборов.
+
+    Без этого неверное имя модели превращается в 180 одинаковых 404
+    и потерянные минуты.
+    """
+    models = list_available_models(base_url, api_key)
+    if not models:
+        print("  (список моделей недоступен — пропускаю проверку)")
+        return True
+    if model in models:
+        print(f"  модель {model} доступна")
+        return True
+
+    print(f"\nОШИБКА: модель {model!r} недоступна для этого ключа.")
+    chat_like = [
+        m for m in models
+        if not any(x in m.lower() for x in ("whisper", "tts", "guard", "embed"))
+    ]
+    print("Доступные модели:")
+    for m in (chat_like or models)[:25]:
+        print(f"  - {m}")
+    print(
+        "\nУкажи нужную в .env через LLM_MODEL=... или флагом --model.\n"
+        "Groq регулярно отключает старые модели: "
+        "https://console.groq.com/docs/deprecations"
+    )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -384,16 +586,38 @@ def main() -> int:
     parser.add_argument("--limit", type=int, help="Обработать только N менеджеров")
     parser.add_argument("--dry-run", action="store_true",
                         help="Не писать в Supabase, показать примеры")
-    parser.add_argument("--model", default=env("ZHIPU_MODEL", DEFAULT_MODEL))
+    parser.add_argument(
+        "--model",
+        default=env("LLM_MODEL", "GROQ_MODEL", "ZHIPU_MODEL",
+                    default=DEFAULT_MODEL),
+        help=f"Модель (по умолчанию {DEFAULT_MODEL})",
+    )
+    parser.add_argument("--list-models", action="store_true",
+                        help="Показать доступные модели и выйти")
     args = parser.parse_args()
 
-    api_key = env("ZHIPU_API_KEY")
+    api_key = env("LLM_API_KEY", "GROQ_API_KEY", "ZHIPU_API_KEY")
+    base_url = env("LLM_BASE_URL", "GROQ_BASE_URL", "ZHIPU_BASE_URL",
+                   default=DEFAULT_BASE_URL)
     supabase_url = env("SUPABASE_URL")
     service_key = env("SUPABASE_SERVICE_KEY")
     csv_url = env("ADMIN_CSV_URL")
 
     if not api_key:
-        return fail("Не задан ZHIPU_API_KEY")
+        return fail(
+            "Не задан ключ LLM. Пропиши в .env любую из переменных: "
+            "LLM_API_KEY / GROQ_API_KEY / ZHIPU_API_KEY"
+        )
+
+    if args.list_models:
+        models = list_available_models(base_url, api_key)
+        if not models:
+            return fail(f"Не удалось получить список моделей с {base_url}")
+        print(f"Доступные модели ({base_url}):")
+        for m in models:
+            print(f"  - {m}")
+        return 0
+
     if not csv_url:
         return fail("Не задан ADMIN_CSV_URL")
     if not args.dry_run and not (supabase_url and service_key):
@@ -402,7 +626,11 @@ def main() -> int:
             "(или запусти с --dry-run)"
         )
 
-    client = OpenAI(api_key=api_key, base_url=ZHIPU_BASE_URL)
+    print(f"Провайдер: {base_url}")
+    if not preflight_check(base_url, api_key, args.model):
+        return 1
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
 
     print("Загружаю админ-таблицу...")
     managers, league_ids = load_admin_sheet(csv_url)

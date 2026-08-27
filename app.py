@@ -516,7 +516,7 @@ def load_admin_sheet(url: str):
      manager_team_map).
 
     league_id_map: {League_Tier: League_ID} — ID H2H-лиги в FPL.
-    pin_map: {Manager_Name: последние 4 FPL ID} — для верификации.
+    pin_map: {Manager_Name: последние 4 цифры телефона} — для верификации.
     manager_team_map: {Manager_Name: FPL_Team_ID}.
     """
     admin_df = pd.read_csv(url)
@@ -554,7 +554,7 @@ def load_admin_sheet(url: str):
             if not valid.empty:
                 league_id_map[tier] = int(valid.iloc[0])
 
-    # PIN = последние 4 цифры FPL ID. Сам номер наружу не отдаём.
+    # PIN = последние 4 цифры телефона. Сам номер наружу не отдаём.
     pin_map = {}
     manager_team_map = {}
     for manager, phone, tid in zip(
@@ -1730,6 +1730,50 @@ def chip_inventory(used_chips):
     return used, left
 
 
+AI_INSIGHTS_TABLE = "ai_insights"
+AI_FALLBACK = (
+    "Разбор для этого тура ещё не сгенерирован. Он появляется после "
+    "публикации календаря на следующий тур — обычно вскоре после дедлайна."
+)
+
+
+@st.cache_data(ttl=300)
+def fetch_ai_insight(team_id: int, gw: int) -> str:
+    """Готовый разбор от AI для команды на конкретный тур.
+
+    Тексты генерируются заранее скриптом ai_generator.py и лежат в Supabase,
+    поэтому здесь только быстрое чтение — никаких обращений к LLM во время
+    отрисовки страницы. Если записи нет, возвращает текст-заглушку.
+    """
+    if not team_id or not gw:
+        return AI_FALLBACK
+
+    url, key = supabase_config()
+    if not url:
+        return AI_FALLBACK
+
+    try:
+        resp = requests.get(
+            f"{url}/rest/v1/{AI_INSIGHTS_TABLE}",
+            headers=_sb_headers(key),
+            params={
+                "select": "insight_text",
+                "team_id": f"eq.{int(team_id)}",
+                "gw": f"eq.{int(gw)}",
+                "limit": "1",
+            },
+            timeout=10,
+        )
+        if not resp.ok:
+            return AI_FALLBACK
+        rows = resp.json()
+        if rows and rows[0].get("insight_text"):
+            return rows[0]["insight_text"]
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        pass
+    return AI_FALLBACK
+
+
 def player_lookup(boot: dict) -> dict:
     """{element_id: {name, pos, team, news, chance}}."""
     if not boot:
@@ -2045,7 +2089,7 @@ else:
         "Менеджер", options=sorted(pin_map.keys()), key="login_name"
     )
     login_pin = st.sidebar.text_input(
-        "PIN-код (последние 4 цифры FPL ID)",
+        "PIN-код (последние 4 цифры телефона)",
         type="password",
         max_chars=4,
         key="login_pin",
@@ -2247,7 +2291,8 @@ with tab_status:
 with tab_leagues:
     if h2h_matches_by_tier:
         calendar_note = (
-            f"Реальные матчи H2H."
+            f"Реальные матчи FPL по {ADMIN_LEAGUE_ID_COL} из админ-таблицы "
+            f"({len(h2h_matches_by_tier)} из {len(ALL_LEAGUES)} лиг)."
         )
     else:
         calendar_note = (
@@ -2453,7 +2498,13 @@ with tab_cabinet:
                         )
 
         # === Блок 3: AI-Аналитика ===
-
+        st.subheader("AI-Аналитика")
+        insight = fetch_ai_insight(my_team_id, next_gw)
+        st.info(f"🤖 **Мнение AI-ассистента на GW{next_gw}**\n\n{insight}")
+        st.caption(
+            "Разбор готовится заранее пакетным скриптом, поэтому "
+            "открывается мгновенно и не зависит от нагрузки на AI-сервис."
+        )
 
 with tab_cups:
     mode, payload = calculate_european_cups(df, current_gw)
@@ -2959,8 +3010,8 @@ with tab_social:
 with tab_exchange:
     st.header("📈 FPL Exchange")
     st.caption(
-        "Игроки как активы: форма, спрос рынка, отдача на "
-        "цену и сложность ближайших матчей (FDR). Данные — из FPL."
+        "Игроки как активы: форма, спрос рынка (нетто-трансферы), отдача на "
+        "цену (ROI) и сложность ближайших матчей (FDR). Данные — из FPL API."
     )
 
     exch_df, exch_src = fetch_exchange_data()
@@ -2979,7 +3030,7 @@ with tab_exchange:
         movers_in = exch_df.nlargest(3, "net_transfers")
         movers_out = exch_df.nsmallest(3, "net_transfers")
 
-        st.markdown("**🟢 Лидеры закупок**")
+        st.markdown("**🟢 Лидеры закупок (нетто-трансферы за тур)**")
         metric_grid(
             [
                 (
