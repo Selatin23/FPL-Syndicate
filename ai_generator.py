@@ -48,7 +48,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
-ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
+ZHIPU_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_MODEL = "glm-4-flash"
 
 AI_TABLE = "ai_insights"
