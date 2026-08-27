@@ -49,7 +49,7 @@ except ImportError:
 
 FPL_BASE_URL = "https://fantasy.premierleague.com/api"
 ZHIPU_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_MODEL = "glm-4-flash"
+DEFAULT_MODEL = "llama-3.1-8b-instant"
 
 AI_TABLE = "ai_insights"
 
