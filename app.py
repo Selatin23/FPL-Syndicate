@@ -2804,7 +2804,7 @@ with tab_wallet:
                     f"{prize_balance:,} ₸".replace(",", " "),
                     None,
                 ),
-                ("Статус взноса", payment_status, None),
+                ("Статус взноса", payment_status, "+"),
             ],
             METRICS_PER_ROW,
         )
