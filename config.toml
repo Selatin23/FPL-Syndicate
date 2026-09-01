@@ -1,0 +1,28 @@
+# .streamlit/config.toml — FPL Syndicate, тёмная тема (dark-mode-first)
+# Токены совпадают с :root в app.py — меняя палитру, правь оба места.
+
+[theme]
+base = "dark"
+primaryColor = "#00DF7A"            # акцент: действия, выбор, активная вкладка
+backgroundColor = "#0C1210"         # глубокий зелёно-чёрный (не серый #111)
+secondaryBackgroundColor = "#141C18"
+textColor = "#E9F0EB"
+linkColor = "#4DE8A4"
+borderColor = "#263329"
+baseRadius = "12px"
+buttonRadius = "10px"
+baseFontSize = 16
+
+# Одна семья на весь продукт (Operate-режим): Golos Text — экранный гротеск
+# с полноценной кириллицей и табличными цифрами.
+font = "'Golos Text':https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700;800&display=swap"
+headingFont = "'Golos Text':https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700;800&display=swap"
+codeFont = "'IBM Plex Mono':https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap"
+
+headingFontWeights = [800, 700, 700]
+metricValueFontWeight = 700
+
+[theme.sidebar]
+backgroundColor = "#101714"
+secondaryBackgroundColor = "#1B2620"
+borderColor = "#263329"

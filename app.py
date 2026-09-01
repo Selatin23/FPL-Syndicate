@@ -1,5 +1,6 @@
 import base64
 import concurrent.futures
+import html
 import json
 import os
 import re
@@ -178,7 +179,34 @@ GA_ID, GA_ACTIVE = inject_ga()
 st.markdown(
     """
     <style>
-    /* Компактные отступы — для телефонов */
+    /* ===== Токены (дублируют .streamlit/config.toml) ===== */
+    :root {
+        --bg: #0C1210;
+        --surface: #141C18;
+        --surface-2: #1B2620;
+        --line: #263329;
+        --line-strong: #34453C;
+        --text: #E9F0EB;
+        --muted: #97A99E;
+        --accent: #00DF7A;
+        --accent-soft: rgba(0, 223, 122, 0.12);
+        --accent-line: rgba(0, 223, 122, 0.38);
+        --gold: #E4C15C;
+        --win: #3AD98B;
+        --loss: #FF8375;
+    }
+
+    /* ===== Поверхности браузера: выделение, фокус, скроллбар ===== */
+    ::selection { background: rgba(0, 223, 122, 0.28); }
+    :focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+    * { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb {
+        background: var(--line-strong); border-radius: 999px;
+    }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    /* ===== Каркас: компактные отступы для телефонов ===== */
     .block-container {
         padding-top: 2.2rem;
         padding-left: 0.9rem;
@@ -187,52 +215,70 @@ st.markdown(
     }
     [data-testid="stHeader"] { height: 2.5rem; }
 
-    /* Объёмные карточки метрик */
+    /* Ритм заголовков: воздуха сверху больше, чем снизу */
+    .block-container h2 { margin: 1.4rem 0 0.55rem 0; letter-spacing: -0.015em; }
+    .block-container h3 { margin: 1.5rem 0 0.5rem 0; letter-spacing: -0.01em; }
+
+    /* Табличные цифры во всех данных */
+    div[data-testid="stMetric"], div[data-testid="stDataFrame"],
+    .status-metric .val, .fpl-chip, .ai-card {
+        font-variant-numeric: tabular-nums;
+    }
+
+    /* ===== Карточки метрик: одна элевация — рамка, без теней ===== */
     div[data-testid="stMetric"] {
-        background: var(--secondary-background-color);
-        border: 1px solid rgba(128, 128, 128, 0.22);
+        background: var(--surface);
+        border: 1px solid var(--line);
         border-radius: 12px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
         padding: 0.75rem 0.9rem;
     }
     [data-testid="stMetricValue"] { font-size: 1.35rem; }
-    [data-testid="stMetricLabel"] { font-size: 0.8rem; opacity: 0.85; }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.8rem; font-weight: 500; color: var(--muted);
+    }
     [data-testid="stMetricDelta"] { font-size: 0.75rem; }
 
-    /* Вкладки: контрастный акцент на активной */
+    /* ===== Вкладки: активную ведёт вес и родное подчёркивание темы ===== */
     div[data-testid="stTabs"] button[data-baseweb="tab"] {
         padding: 0.45rem 0.75rem;
         font-size: 0.9rem;
-        border-radius: 10px 10px 0 0;
+        color: var(--muted);
     }
     div[data-testid="stTabs"] button[aria-selected="true"] {
-        background: rgba(0, 223, 122, 0.14);
-        border-bottom: 3px solid #00DF7A;
+        color: var(--text);
         font-weight: 700;
     }
 
+    /* ===== Таблицы ===== */
     div[data-testid="stDataFrame"] {
         font-size: 0.85rem;
         border-radius: 12px;
         overflow: hidden;
-        border: 1px solid rgba(128, 128, 128, 0.22);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+        border: 1px solid var(--line);
     }
     /* Горизонтальный скролл таблиц на смартфонах без ломки вёрстки */
     div[data-testid="stDataFrame"] > div { max-width: 100%; overflow-x: auto; }
     div[data-testid="stDataFrameResizable"] { min-width: 0; }
 
-    /* Баннер */
+    /* ===== Баннер ===== */
     .fpl-banner {
-        border: 1px solid rgba(128, 128, 128, 0.22);
-        border-radius: 14px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-        padding: 0.9rem 1.1rem;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1rem 1.2rem;
         margin-bottom: 0.6rem;
     }
-    .fpl-banner h1 { margin: 0 0 0.35rem 0; font-size: 1.6rem; }
-    .fpl-banner p { margin: 0; font-size: 0.92rem; opacity: 0.88; }
-    .fpl-chips { margin-top: 0.7rem; }
+    .fpl-banner h1 {
+        margin: 0 0 0.35rem 0;
+        font-size: 1.55rem;
+        font-weight: 800;
+        letter-spacing: -0.015em;
+    }
+    .fpl-banner p {
+        margin: 0; font-size: 0.92rem; color: var(--muted);
+        max-width: 68ch; line-height: 1.55;
+    }
+    .fpl-chips { margin-top: 0.75rem; }
     .fpl-chip {
         display: inline-block;
         padding: 0.22rem 0.65rem;
@@ -240,12 +286,12 @@ st.markdown(
         border-radius: 999px;
         font-size: 0.78rem;
         font-weight: 600;
-        background: rgba(0, 223, 122, 0.14);
-        border: 1px solid rgba(0, 223, 122, 0.45);
+        color: var(--text);
+        background: var(--surface-2);
+        border: 1px solid var(--line-strong);
     }
 
-
-    /* Карточки постов социальной ленты */
+    /* ===== Карточки постов социальной ленты ===== */
     .fpl-post-head {
         display: flex;
         flex-wrap: wrap;
@@ -259,8 +305,9 @@ st.markdown(
         display: inline-flex;
         align-items: center; justify-content: center;
         font-size: 0.85rem; font-weight: 700;
-        background: rgba(0, 223, 122, 0.18);
-        border: 1px solid rgba(0, 223, 122, 0.45);
+        color: var(--accent);
+        background: var(--accent-soft);
+        border: 1px solid var(--accent-line);
         flex: 0 0 auto;
     }
     .fpl-author { font-weight: 700; font-size: 0.92rem; }
@@ -269,106 +316,154 @@ st.markdown(
         padding: 0.1rem 0.5rem;
         border-radius: 999px;
         font-size: 0.7rem; font-weight: 600;
-        border: 1px solid rgba(128, 128, 128, 0.35);
-        background: rgba(128, 128, 128, 0.12);
+        color: var(--muted);
+        border: 1px solid var(--line-strong);
+        background: var(--surface-2);
         white-space: nowrap;
     }
     .fpl-badge-ok {
-        background: rgba(0, 223, 122, 0.16);
-        border-color: rgba(0, 223, 122, 0.5);
+        color: var(--accent);
+        background: var(--accent-soft);
+        border-color: var(--accent-line);
     }
-    .fpl-post-meta { font-size: 0.72rem; opacity: 0.62; }
+    .fpl-post-meta { font-size: 0.72rem; color: var(--muted); }
     .fpl-post-body {
         font-size: 0.92rem;
-        line-height: 1.45;
+        line-height: 1.55;
+        max-width: 68ch;
         white-space: pre-wrap;
         word-break: break-word;
         margin: 0.25rem 0 0.15rem 0;
     }
 
-    /* Кабинет менеджера — строгий брокерский стиль */
-    .dash-card {
-        border: 1px solid rgba(128, 128, 128, 0.28);
-        border-radius: 10px;
-        padding: 0.7rem 0.9rem;
-        background: rgba(128, 128, 128, 0.05);
-    }
+    /* ===== Кабинет менеджера ===== */
     .dash-vs {
-        border: 1px solid rgba(0, 223, 122, 0.4);
-        border-radius: 10px;
-        padding: 0.7rem 0.9rem;
-        background: rgba(0, 223, 122, 0.06);
-        font-weight: 700;
-        font-size: 1.05rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+        background: var(--surface-2);
+        border: 1px solid var(--line-strong);
+        border-radius: 12px;
+        padding: 0.75rem 1rem;
         margin: 0.3rem 0 0.6rem 0;
     }
-    .dash-diff { font-size: 0.88rem; line-height: 1.7; }
-    .dash-diff-me { color: #16A34A; }
-    .dash-diff-opp { color: #DC2626; }
+    .dash-vs-label { font-size: 0.74rem; font-weight: 600; color: var(--muted); }
+    .dash-vs-name {
+        font-size: 1.15rem; font-weight: 800; letter-spacing: -0.01em;
+    }
+    .dash-diff { font-size: 0.9rem; line-height: 1.75; }
+    .dash-diff-me { color: var(--win); }
+    .dash-diff-opp { color: var(--loss); }
 
-    /* Стартовый дашборд «Статус» */
+    /* Карточка AI-разбора — главный «дорогой» элемент кабинета */
+    .ai-card {
+        background: var(--surface-2);
+        border: 1px solid var(--line-strong);
+        border-radius: 12px;
+        padding: 1.1rem 1.25rem 1rem 1.25rem;
+        margin: 0.2rem 0 0.4rem 0;
+    }
+    .ai-card-head {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        margin-bottom: 0.65rem;
+    }
+    .ai-card-head svg { flex: 0 0 auto; display: block; }
+    .ai-card-title { font-weight: 700; font-size: 0.95rem; }
+    .ai-card-tag {
+        margin-left: auto;
+        font-size: 0.68rem; font-weight: 600;
+        color: var(--accent);
+        background: var(--accent-soft);
+        border: 1px solid var(--accent-line);
+        padding: 0.1rem 0.5rem;
+        border-radius: 999px;
+        white-space: nowrap;
+    }
+    .ai-card-body {
+        margin: 0;
+        font-size: 1rem;
+        line-height: 1.7;
+        max-width: 68ch;
+    }
+    .ai-card-meta {
+        margin-top: 0.85rem;
+        padding-top: 0.65rem;
+        border-top: 1px solid var(--line);
+        font-size: 0.74rem;
+        color: var(--muted);
+    }
+
+    /* ===== Стартовый дашборд «Статус» ===== */
     .status-row {
         display: flex;
         flex-wrap: wrap;
         gap: 0.5rem;
         margin: 0.3rem 0 0.8rem 0;
     }
+    /* Градиент рейтинга кодирует место лиги; тон приходит через --tone */
     .status-lg {
         flex: 1 1 0;
         min-width: 78px;
         border-radius: 10px;
         padding: 0.55rem 0.4rem;
         text-align: center;
-        color: #0b1120;
-        border: 1px solid rgba(0, 0, 0, 0.25);
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.04);
+        background: color-mix(in srgb, var(--tone, #4ade80) 16%, transparent);
+        border: 1px solid var(--line-strong);
+        border-color: color-mix(in srgb, var(--tone, #4ade80) 45%, transparent);
     }
     .status-lg b { display: block; font-size: 0.92rem; line-height: 1.2; }
-    .status-lg span { font-size: 0.72rem; opacity: 0.85; }
+    .status-lg span { font-size: 0.72rem; color: var(--muted); }
     .status-panel {
-        border: 1px solid rgba(0, 223, 122, 0.28);
+        background: var(--surface);
+        border: 1px solid var(--line);
         border-radius: 12px;
         padding: 0.8rem 1rem;
-        background: rgba(10, 20, 16, 0.35);
         height: 100%;
     }
     .status-panel h4 {
-        margin: 0 0 0.6rem 0;
-        font-size: 0.85rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: #00DF7A;
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        margin: 0 0 0.7rem 0;
+        font-size: 0.95rem;
+        font-weight: 700;
     }
     .status-metrics { display: flex; flex-wrap: wrap; gap: 0.6rem; }
     .status-metric {
         flex: 1 1 40%;
-        border-radius: 8px;
+        border-radius: 10px;
         padding: 0.45rem 0.6rem;
-        background: rgba(0, 223, 122, 0.07);
-        border: 1px solid rgba(0, 223, 122, 0.18);
+        background: var(--surface-2);
+        border: 1px solid var(--line);
     }
     .status-metric .lbl {
-        font-size: 0.66rem; letter-spacing: 0.06em;
-        text-transform: uppercase; opacity: 0.7;
+        font-size: 0.68rem; font-weight: 600; color: var(--muted);
     }
-    .status-metric .val { font-size: 1.25rem; font-weight: 700; }
+    .status-metric .val { font-size: 1.3rem; font-weight: 700; }
     .status-badge {
         display: inline-block;
+        margin-left: auto;
         padding: 0.05rem 0.5rem;
         border-radius: 999px;
-        font-size: 0.82rem;
+        font-size: 0.78rem;
         font-weight: 700;
-        color: #0b1120;
-        background: #FFD700;
+        color: var(--gold);
+        background: rgba(228, 195, 92, 0.12);
+        border: 1px solid rgba(228, 195, 92, 0.4);
     }
 
-    /* Футер */
+    /* ===== Футер ===== */
     .fpl-footer {
         margin-top: 2rem;
         padding: 0.9rem 0 0.4rem 0;
-        border-top: 1px solid rgba(128, 128, 128, 0.25);
+        border-top: 1px solid var(--line);
         text-align: center;
         font-size: 0.8rem;
-        opacity: 0.7;
+        color: var(--muted);
     }
     </style>
     """,
@@ -2190,7 +2285,7 @@ with tab_status:
             for i, (_, r) in enumerate(rating.iterrows()):
                 color = _lg_grad_color(i, n)
                 cards.append(
-                    f'<div class="status-lg" style="background:{color}">'
+                    f'<div class="status-lg" style="--tone:{color}">'
                     f'<b>{r["Дивизион"]}</b>'
                     f'<span>{r["Средний Total"]:.1f} ср.</span></div>'
                 )
@@ -2435,8 +2530,12 @@ with tab_cabinet:
             opp = fetch_manager_summary(opp_id)
             opp_name = opp["manager"] if opp else f"Team {opp_id}"
             st.markdown(
-                f'<div class="dash-vs">⚔️ Твой соперник в GW{next_gw}: '
-                f"{opp_name}</div>",
+                f"""
+                <div class="dash-vs">
+                    <span class="dash-vs-label">Соперник в GW{next_gw}</span>
+                    <span class="dash-vs-name">{html.escape(opp_name)}</span>
+                </div>
+                """,
                 unsafe_allow_html=True,
             )
 
@@ -2500,10 +2599,30 @@ with tab_cabinet:
         # === Блок 3: AI-Аналитика ===
         st.subheader("AI-Аналитика")
         insight = fetch_ai_insight(my_team_id, next_gw)
-        st.info(f"🤖 **Мнение AI-ассистента на GW{next_gw}**\n\n{insight}")
-        st.caption(
-            "AI может иногда ошибаться, поэтому используйте его подсказки как полезную пищу для размышлений, "
-            "но финальные решения всегда принимайте своей интуицией!"
+        radar_icon = (
+            '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" '
+            'stroke="#00DF7A" stroke-width="1.8" stroke-linecap="round" '
+            'stroke-linejoin="round" aria-hidden="true">'
+            '<path d="M12 3v3M12 18v3M3 12h3M18 12h3'
+            'M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1'
+            'M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/>'
+            '<circle cx="12" cy="12" r="3.2"/></svg>'
+        )
+        st.markdown(
+            f"""
+            <div class="ai-card">
+                <div class="ai-card-head">
+                    {radar_icon}
+                    <span class="ai-card-title">Скаутинг на GW{next_gw}</span>
+                    <span class="ai-card-tag">AI</span>
+                </div>
+                <p class="ai-card-body">{html.escape(insight)}</p>
+                <div class="ai-card-meta">Разбор готовится заранее пакетным
+                скриптом — открывается мгновенно и не зависит от нагрузки
+                на AI-сервис.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
 with tab_cups:
