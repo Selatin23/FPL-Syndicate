@@ -554,7 +554,7 @@ def load_admin_sheet(url: str):
             if not valid.empty:
                 league_id_map[tier] = int(valid.iloc[0])
 
-    # PIN = последние 4 цифры телефона. Сам номер наружу не отдаём.
+    # PIN = последние 4 цифры FPLID. Сам номер наружу не отдаём.
     pin_map = {}
     manager_team_map = {}
     for manager, phone, tid in zip(
