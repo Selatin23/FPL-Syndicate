@@ -2089,7 +2089,7 @@ else:
         "Менеджер", options=sorted(pin_map.keys()), key="login_name"
     )
     login_pin = st.sidebar.text_input(
-        "PIN-код (последние 4 цифры телефона)",
+        "PIN-код (последние 4 цифры FPL ID)",
         type="password",
         max_chars=4,
         key="login_pin",
