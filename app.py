@@ -516,7 +516,7 @@ def load_admin_sheet(url: str):
      manager_team_map).
 
     league_id_map: {League_Tier: League_ID} — ID H2H-лиги в FPL.
-    pin_map: {Manager_Name: последние 4 цифры телефона} — для верификации.
+    pin_map: {Manager_Name: последние 4 цифры FPL ID} — для верификации.
     manager_team_map: {Manager_Name: FPL_Team_ID}.
     """
     admin_df = pd.read_csv(url)
