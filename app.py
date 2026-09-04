@@ -1,5 +1,7 @@
 import base64
 import concurrent.futures
+import hashlib
+import io
 import json
 import os
 import re
@@ -436,6 +438,10 @@ CSV_URL = (
     "6dCuo4dS1R9V_tlJrFKH/pub?output=csv"
 )
 
+# Сколько ждём ответа Google Таблиц, прежде чем сдаться (в секундах).
+# Без этого приложение зависало намертво.
+ADMIN_FETCH_TIMEOUT = 15
+
 ADMIN_REQUIRED_COLS = [
     "Phone_Number",
     "FPL_Team_ID",
@@ -519,7 +525,19 @@ def load_admin_sheet(url: str):
     pin_map: {Manager_Name: последние 4 цифры FPL ID} — для верификации.
     manager_team_map: {Manager_Name: FPL_Team_ID}.
     """
-    admin_df = pd.read_csv(url)
+    # ВАЖНО: pd.read_csv(url) качает по сети без таймаута — если Google
+    # не отвечает, приложение висит бесконечно. Поэтому скачиваем сами,
+    # с жёстким ограничением по времени, и парсим уже готовый текст.
+    try:
+        resp = requests.get(url, timeout=ADMIN_FETCH_TIMEOUT)
+        resp.raise_for_status()
+    except requests.exceptions.Timeout as e:
+        raise TimeoutError(
+            f"Таблица не ответила за {ADMIN_FETCH_TIMEOUT} с"
+        ) from e
+    # Google отдаёт CSV в UTF-8; requests иногда угадывает кодировку неверно
+    resp.encoding = resp.encoding or "utf-8"
+    admin_df = pd.read_csv(io.StringIO(resp.text))
 
     missing = [c for c in ADMIN_REQUIRED_COLS if c not in admin_df.columns]
     if missing:
@@ -2064,13 +2082,77 @@ def division_rating(data: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- Глобальная авторизация ----------
 
-st.sidebar.header("🔐 Авторизация")
+# ---------- Сохранение входа между перезагрузками страницы ----------
+#
+# Streamlit сбрасывает session_state при F5, поэтому метку входа держим
+# в адресе страницы. Класть туда одно только имя нельзя: любой может
+# дописать ?user=Чужое_Имя и попасть в чужой кабинет без PIN. Поэтому
+# рядом с именем идёт короткая подпись, посчитанная из имени и PIN.
+# Подобрать её, не зная PIN, нельзя, а мы сверяем её по своей таблице.
+
+QP_USER = "user"
+QP_TOKEN = "t"
+
+
+def session_token(name: str, pin: str) -> str:
+    """Короткая подпись пары (менеджер, PIN) для адресной строки."""
+    raw = f"{name}:{pin}:fpl-syndicate".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def remember_login(name: str, pin: str) -> None:
+    st.query_params[QP_USER] = name
+    st.query_params[QP_TOKEN] = session_token(name, pin)
+
+
+def apply_login(name: str) -> None:
+    """Проставляет в сессию имя и дивизион менеджера."""
+    st.session_state["logged_in"] = True
+    st.session_state["current_user"] = name
+    tier_rows = df.loc[
+        df["manager_name"].astype(str) == name, "league_tier"
+    ]
+    st.session_state["current_tier"] = (
+        tier_rows.iloc[0] if not tier_rows.empty else None
+    )
+
+
+def restore_login_from_url() -> None:
+    """Восстанавливает вход после перезагрузки страницы, если подпись верна."""
+    if st.session_state.get("logged_in"):
+        return
+    name = st.query_params.get(QP_USER)
+    if not name:
+        return
+    if not pin_map:
+        # Админ-таблица не загрузилась — проверить подпись нечем.
+        # Метку в адресе не трогаем: данные вернутся, вход восстановится.
+        return
+
+    token = st.query_params.get(QP_TOKEN)
+    expected_pin = pin_map.get(name)
+    if not token or not expected_pin or token != session_token(name, expected_pin):
+        # Ссылку подделали, она устарела или менеджера убрали из таблицы
+        st.query_params.pop(QP_USER, None)
+        st.query_params.pop(QP_TOKEN, None)
+        return
+
+    apply_login(name)
 
 
 def logout():
-    """Полный выход: чистим всё, что относится к сессии пользователя."""
+    """Полный выход: чистим и сессию, и метку в адресе страницы."""
     for key in ("logged_in", "current_user", "current_tier", "verified_manager"):
         st.session_state.pop(key, None)
+    st.query_params.pop(QP_USER, None)
+    st.query_params.pop(QP_TOKEN, None)
+
+
+# Проверяем адрес до отрисовки формы входа, иначе после F5 на мгновение
+# показалась бы форма, а уже потом — имя вошедшего.
+restore_login_from_url()
+
+st.sidebar.header("🔐 Авторизация")
 
 
 if st.session_state.get("logged_in"):
@@ -2095,15 +2177,10 @@ else:
         key="login_pin",
     )
     if st.sidebar.button("Войти", type="primary", use_container_width=True):
-        if login_pin.strip() and login_pin.strip() == pin_map.get(login_name):
-            st.session_state["logged_in"] = True
-            st.session_state["current_user"] = login_name
-            tier_rows = df.loc[
-                df["manager_name"].astype(str) == login_name, "league_tier"
-            ]
-            st.session_state["current_tier"] = (
-                tier_rows.iloc[0] if not tier_rows.empty else None
-            )
+        entered = login_pin.strip()
+        if entered and entered == pin_map.get(login_name):
+            apply_login(login_name)
+            remember_login(login_name, entered)
             st.rerun()
         else:
             st.sidebar.error("❌ Неверный PIN-код")
