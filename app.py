@@ -1873,8 +1873,7 @@ try:
     ) = load_admin_sheet(CSV_URL)
 except Exception as e:
     st.error(
-        "Не удалось загрузить админ-таблицу Google Sheets. "
-        f"Проверь CSV_URL и доступ к публикации.\n\nДетали: {e}"
+        "⚠️ Не удалось обновить данные... "
     )
     st.stop()
 
