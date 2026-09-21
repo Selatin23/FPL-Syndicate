@@ -28,6 +28,7 @@ st.set_page_config(
 # ---------- Порядок вкладок ----------
 
 TAB_STATUS = "📊 Статус"
+TAB_CLASSIC = "👥 Общий зачёт"
 TAB_LEAGUES = "🏆 Лиги"
 TAB_CABINET = "💼 Мой кабинет"
 TAB_SOCIAL = "💬 Сообщество"
@@ -38,13 +39,14 @@ TAB_WALLET = "💰 Финансы"
 TAB_EXCHANGE = "📈 Биржа"
 
 TAB_LABELS = [
-    TAB_STATUS, TAB_LEAGUES, TAB_CABINET, TAB_SOCIAL, TAB_CUPS, TAB_SQUID,
-    TAB_FAME, TAB_WALLET, TAB_EXCHANGE,
+    TAB_STATUS, TAB_CLASSIC, TAB_LEAGUES, TAB_CABINET, TAB_SOCIAL, TAB_CUPS,
+    TAB_SQUID, TAB_FAME, TAB_WALLET, TAB_EXCHANGE,
 ]
 
 # Человекочитаемые пути для GA4 (эмодзи в URL читать неудобно)
 TAB_PATHS = {
     TAB_STATUS: "/status",
+    TAB_CLASSIC: "/classic-league",
     TAB_LEAGUES: "/leagues",
     TAB_CABINET: "/dashboard",
     TAB_SOCIAL: "/community",
@@ -1940,6 +1942,13 @@ gw_cols_display = gw_cols_all[-5:]
 
 FPL_ENTRY_URL = "https://fantasy.premierleague.com/entry/{team_id}/event/1"
 
+# Официальная классическая лига синдиката в FPL
+CLASSIC_LEAGUE_ID = 167924
+CLASSIC_LEAGUE_URL = (
+    "https://fantasy.premierleague.com/en/leagues/"
+    f"{CLASSIC_LEAGUE_ID}/standings/c?page_standings=1"
+)
+
 
 
 def league_table(data: pd.DataFrame, tier: str) -> pd.DataFrame:
@@ -2212,8 +2221,8 @@ METRICS_PER_ROW = 2 if compact else 4
 # ---------- Вывод: вкладки ----------
 
 (
-    tab_status, tab_leagues, tab_cabinet, tab_social, tab_cups, tab_squid,
-    tab_fame, tab_wallet, tab_exchange,
+    tab_status, tab_classic, tab_leagues, tab_cabinet, tab_social, tab_cups,
+    tab_squid, tab_fame, tab_wallet, tab_exchange,
 ) = st.tabs(TAB_LABELS)
 
 
@@ -2363,6 +2372,74 @@ with tab_status:
                     "первого тура."
                 )
             st.markdown("</div>", unsafe_allow_html=True)
+
+with tab_classic:
+    st.header("👥 Общий зачёт")
+    st.caption(
+        f"Все участники синдиката в одной таблице по сумме очков за сезон "
+        f"(по состоянию на GW{current_gw}). Официальная классическая лига "
+        f"в FPL — [ID {CLASSIC_LEAGUE_ID}]({CLASSIC_LEAGUE_URL}). "
+        "Название команды ведёт на её профиль в FPL."
+    )
+
+    if df.empty:
+        st.info("Данных пока нет — таблица заполнится после старта сезона.")
+    else:
+        classic = (
+            df.sort_values(
+                ["total_pts", "team_name"], ascending=[False, True]
+            )
+            .reset_index(drop=True)
+        )
+        # При равенстве очков место делится, как в официальной лиге FPL
+        places = (
+            classic["total_pts"].rank(method="min", ascending=False).astype(int)
+        )
+
+        classic_view = pd.DataFrame(
+            {
+                "#": places.values,
+                # Имя команды в якоре URL — LinkColumn покажет его как текст
+                "Команда": [
+                    f"{FPL_ENTRY_URL.format(team_id=int(t))}#{name}"
+                    for t, name in zip(classic["team_id"], classic["team_name"])
+                ],
+                "Менеджер": classic["manager_name"].values,
+                "Дивизион": classic["league_tier"].values,
+                "Total Pts": classic["total_pts"].fillna(0).astype(int).values,
+            }
+        )
+
+        classic_config = {
+            "#": st.column_config.NumberColumn(
+                "#", width="small", alignment="center"
+            ),
+            "Команда": st.column_config.LinkColumn(
+                "Команда", width="medium", display_text=r"#(.*)$"
+            ),
+            "Менеджер": st.column_config.TextColumn("Менеджер", width="medium"),
+            "Дивизион": st.column_config.TextColumn("Дивизион", width="small"),
+            "Total Pts": st.column_config.NumberColumn(
+                "Total Pts",
+                width="small",
+                alignment="center",
+                help=f"Сумма очков за GW1–GW{current_gw}",
+            ),
+        }
+
+        if compact:
+            # На телефоне дивизион уже виден по контексту — экономим ширину
+            classic_view = classic_view.drop(columns=["Дивизион"])
+            classic_config.pop("Дивизион")
+
+        st.dataframe(
+            classic_view,
+            column_config=classic_config,
+            hide_index=True,
+            use_container_width=True,
+            height=min(38 * (len(classic_view) + 1), 740),
+        )
+        st.caption(f"Участников в зачёте: {len(classic_view)}.")
 
 with tab_leagues:
     if h2h_matches_by_tier:
