@@ -28,7 +28,7 @@ st.set_page_config(
 # ---------- Порядок вкладок ----------
 
 TAB_STATUS = "📊 Статус"
-TAB_CLASSIC = "👥 Общий зачёт"
+TAB_SYNDICATE = "👥 Syndicate League"
 TAB_LEAGUES = "🏆 Лиги"
 TAB_CABINET = "💼 Мой кабинет"
 TAB_SOCIAL = "💬 Сообщество"
@@ -39,14 +39,14 @@ TAB_WALLET = "💰 Финансы"
 TAB_EXCHANGE = "📈 Биржа"
 
 TAB_LABELS = [
-    TAB_STATUS, TAB_CLASSIC, TAB_LEAGUES, TAB_CABINET, TAB_SOCIAL, TAB_CUPS,
+    TAB_STATUS, TAB_SYNDICATE, TAB_LEAGUES, TAB_CABINET, TAB_SOCIAL, TAB_CUPS,
     TAB_SQUID, TAB_FAME, TAB_WALLET, TAB_EXCHANGE,
 ]
 
 # Человекочитаемые пути для GA4 (эмодзи в URL читать неудобно)
 TAB_PATHS = {
     TAB_STATUS: "/status",
-    TAB_CLASSIC: "/classic-league",
+    TAB_SYNDICATE: "/syndicate-league",
     TAB_LEAGUES: "/leagues",
     TAB_CABINET: "/dashboard",
     TAB_SOCIAL: "/community",
@@ -682,17 +682,32 @@ def fetch_fpl_data(team_ids: list[int], team_tier_map: dict) -> pd.DataFrame:
 
             current = history.get("current", [])
 
-            # Собираем очки за все сыгранные туры (1..38)
+            # Собираем очки за все сыгранные туры (1..38).
+            # В истории FPL поле points — очки ДО вычета штрафа за платные
+            # трансферы (hits, -4 за каждый сверх бесплатных). Штраф лежит
+            # отдельно в event_transfers_cost. Официальный сайт показывает
+            # итог тура уже за вычетом штрафа — считаем так же.
             gw_points = {}
             team_value = None
             for gw_entry in current:
                 event = gw_entry.get("event")
                 if not event:
                     continue
-                gw_points[gw_col(event)] = gw_entry.get("points", 0)
+                gross_pts = gw_entry.get("points") or 0
+                hit_cost = gw_entry.get("event_transfers_cost") or 0
+                net_pts = gross_pts - hit_cost
+                gw_points[gw_col(event)] = net_pts
                 # value приходит в десятых долях (1005 -> 100.5)
                 if gw_entry.get("value") is not None:
                     team_value = gw_entry["value"] / 10
+
+            # Сыгранные фишки приходят в том же ответе — отдельный запрос
+            # не нужен. Храним компактно: [(название, тур), ...]
+            chips = tuple(
+                (str(c.get("name") or "").lower(), c.get("event"))
+                for c in history.get("chips", []) or []
+                if isinstance(c, dict) and c.get("name")
+            )
 
             row = {
                 "team_id": team_id,
@@ -704,6 +719,7 @@ def fetch_fpl_data(team_ids: list[int], team_tier_map: dict) -> pd.DataFrame:
                 "league_tier": team_tier_map.get(team_id, "Premier League"),
                 **gw_points,
                 "team_value": team_value,
+                "chips": chips,
             }
             return row, None
         except requests.exceptions.RequestException as e:
@@ -740,7 +756,7 @@ def fetch_fpl_data(team_ids: list[int], team_tier_map: dict) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
                 "team_id", "manager_name", "team_name",
-                "league_tier", "team_value",
+                "league_tier", "team_value", "chips",
             ]
         )
 
@@ -1715,6 +1731,38 @@ CHIP_ALLOWANCE = [
 ]
 
 
+# Иконки фишек для таблиц. Порядок задаёт порядок в легенде.
+CHIP_ICONS = {
+    "wildcard": ("🃏", "Wildcard"),
+    "freehit": ("🔄", "Free Hit"),
+    "3xc": ("⚡", "Triple Captain"),
+    "bboost": ("🔋", "Bench Boost"),
+}
+CHIP_UNKNOWN_ICON = "🎲"  # новая фишка, которую FPL может ввести в сезоне
+CHIP_LEGEND = " | ".join(f"{icon} {label}" for icon, label in CHIP_ICONS.values())
+
+
+def chips_badges(chips, upto_gw: int | None = None, with_gw: bool = True) -> str:
+    """Компактная строка сыгранных фишек в порядке использования.
+
+    chips — [(название, тур), ...] из fetch_fpl_data. Фишки, сыгранные
+    позже выбранного тура, не показываются: слайдер «отматывает» сезон.
+    """
+    played = []
+    for name, event in chips or ():
+        if upto_gw is not None and event is not None and event > upto_gw:
+            continue
+        played.append((event if event is not None else 99, name))
+    if not played:
+        return "—"
+    played.sort()
+    parts = []
+    for event, name in played:
+        icon = CHIP_ICONS.get(name, (CHIP_UNKNOWN_ICON, name))[0]
+        parts.append(f"{icon} GW{event}" if with_gw and event != 99 else icon)
+    return "  ".join(parts)
+
+
 def chip_inventory(used_chips):
     """Разбирает список использованных фишек из FPL API.
 
@@ -2221,7 +2269,7 @@ METRICS_PER_ROW = 2 if compact else 4
 # ---------- Вывод: вкладки ----------
 
 (
-    tab_status, tab_classic, tab_leagues, tab_cabinet, tab_social, tab_cups,
+    tab_status, tab_syndicate, tab_leagues, tab_cabinet, tab_social, tab_cups,
     tab_squid, tab_fame, tab_wallet, tab_exchange,
 ) = st.tabs(TAB_LABELS)
 
@@ -2373,14 +2421,16 @@ with tab_status:
                 )
             st.markdown("</div>", unsafe_allow_html=True)
 
-with tab_classic:
-    st.header("👥 Общий зачёт")
+with tab_syndicate:
+    st.header("👥 Syndicate League")
     st.caption(
         f"Все участники синдиката в одной таблице по сумме очков за сезон "
-        f"(по состоянию на GW{current_gw}). Официальная классическая лига "
-        f"в FPL — [ID {CLASSIC_LEAGUE_ID}]({CLASSIC_LEAGUE_URL}). "
+        f"(по состоянию на GW{current_gw}), с учётом штрафов за платные "
+        f"трансферы — как на сайте FPL. Официальная классическая лига — "
+        f"[ID {CLASSIC_LEAGUE_ID}]({CLASSIC_LEAGUE_URL}). "
         "Название команды ведёт на её профиль в FPL."
     )
+    st.caption(f"Фишки: {CHIP_LEGEND}")
 
     if df.empty:
         st.info("Данных пока нет — таблица заполнится после старта сезона.")
@@ -2395,6 +2445,10 @@ with tab_classic:
         places = (
             classic["total_pts"].rank(method="min", ascending=False).astype(int)
         )
+        chip_col = (
+            classic["chips"] if "chips" in classic.columns
+            else pd.Series([()] * len(classic))
+        )
 
         classic_view = pd.DataFrame(
             {
@@ -2406,6 +2460,11 @@ with tab_classic:
                 ],
                 "Менеджер": classic["manager_name"].values,
                 "Дивизион": classic["league_tier"].values,
+                # На телефоне только иконки, на десктопе — ещё и номер тура
+                "Фишки": [
+                    chips_badges(c, upto_gw=current_gw, with_gw=not compact)
+                    for c in chip_col
+                ],
                 "Total Pts": classic["total_pts"].fillna(0).astype(int).values,
             }
         )
@@ -2419,11 +2478,19 @@ with tab_classic:
             ),
             "Менеджер": st.column_config.TextColumn("Менеджер", width="medium"),
             "Дивизион": st.column_config.TextColumn("Дивизион", width="small"),
+            "Фишки": st.column_config.TextColumn(
+                "Фишки",
+                width="small" if compact else "medium",
+                help=f"Сыгранные фишки в порядке использования. {CHIP_LEGEND}",
+            ),
             "Total Pts": st.column_config.NumberColumn(
                 "Total Pts",
                 width="small",
                 alignment="center",
-                help=f"Сумма очков за GW1–GW{current_gw}",
+                help=(
+                    f"Сумма очков за GW1–GW{current_gw} "
+                    "за вычетом штрафов за трансферы"
+                ),
             ),
         }
 
